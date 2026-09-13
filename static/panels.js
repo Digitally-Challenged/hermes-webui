@@ -4497,11 +4497,29 @@ function _renderSystemHealthPanel() {
 
 function _renderLlmWikiStatus(d) {
   const status = d || {status:'error'};
+  const wikis = Array.isArray(status.wikis) && status.wikis.length ? status.wikis : [status];
+  const multi = wikis.length > 1;
+
+  const badgeFor = (w) => {
+    const ready = w.available && w.status === 'ready';
+    const empty = w.available && w.status === 'empty';
+    const isErr = w.status === 'error';
+    return {
+      cls: ready ? 'ok' : isErr ? 'err' : empty ? 'warn' : 'muted',
+      text: ready ? 'Available' : isErr ? 'Error' : empty ? 'Empty' : 'Unavailable',
+    };
+  };
+
   const isReady = status.available && status.status === 'ready';
   const isEmpty = status.available && status.status === 'empty';
   const isError = status.status === 'error';
-  const badgeClass = isReady ? 'ok' : isError ? 'err' : isEmpty ? 'warn' : 'muted';
-  const badgeText = isReady ? 'Available' : isError ? 'Error' : isEmpty ? 'Empty' : 'Unavailable';
+  const primaryBadge = badgeFor(status);
+  const badgeClass = primaryBadge.cls;
+  // When several wikis are configured, the headline badge summarises them all
+  // rather than describing only the primary.
+  const reachable = wikis.filter(w => w.available).length;
+  const badgeText = multi ? `${reachable}/${wikis.length} wikis` : primaryBadge.text;
+
   const rawDocsUrl = status.docs_url || 'https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/research/research-llm-wiki';
   // Guard against unsafe URL schemes (e.g. js: / data:) if docs_url ever
   // becomes config-driven. esc() HTML-escapes but doesn't validate URL scheme.
@@ -4509,13 +4527,47 @@ function _renderLlmWikiStatus(d) {
   const toggleNote = status.toggle_available
     ? 'Toggle available from configured Hermes Agent setting.'
     : (status.toggle_reason || 'No stable LLM Wiki on/off config flag was detected, so this panel is read-only.');
-  const statusNote = isReady
-    ? 'LLM Wiki is configured and page metadata is visible without exposing wiki content.'
-    : isEmpty
-      ? 'LLM Wiki exists but has no entity, concept, comparison, or query pages yet.'
-      : isError
-        ? `Unable to inspect LLM Wiki status${status.error ? ': ' + status.error : ''}.`
-        : 'No LLM Wiki directory was found. Set WIKI_PATH or skills.config.wiki.path to enable status visibility.';
+
+  const declaredDirs = Array.isArray(status.page_dirs) && status.page_dirs.length
+    ? status.page_dirs.join(', ')
+    : 'none declared';
+  let statusNote;
+  if (multi) {
+    statusNote = `Tracking ${wikis.length} wikis. Entries, pages, and raw/ files below are totals across all of them.`;
+  } else if (isReady) {
+    statusNote = 'LLM Wiki is configured and page metadata is visible without exposing wiki content.';
+  } else if (isEmpty) {
+    statusNote = `LLM Wiki exists but has no pages in its declared sections (${declaredDirs}).`;
+  } else if (isError) {
+    statusNote = `Unable to inspect LLM Wiki status${status.error ? ': ' + status.error : ''}.`;
+  } else {
+    statusNote = 'No LLM Wiki directory was found. Set WIKI_PATH, WIKI_PATHS, or skills.config.wiki.path to enable status visibility.';
+  }
+
+  const num = (v) => Number(v || 0).toLocaleString();
+  const entries = multi ? (status.entry_count_total ?? status.entry_count) : status.entry_count;
+  const pages = multi ? (status.page_count_total ?? status.page_count) : status.page_count;
+  const rawFiles = multi ? (status.raw_source_count_total ?? status.raw_source_count) : status.raw_source_count;
+
+  const wikiRows = multi ? `
+      <div class="wiki-status-list">
+        ${wikis.map(w => {
+          const b = badgeFor(w);
+          const meta = [
+            `${num(w.entry_count)} entries`,
+            `${num(w.raw_source_count)} raw/ files`,
+            w.status === 'missing' ? 'not found' : (w.status === 'not_directory' ? 'not a directory' : ''),
+          ].filter(Boolean).join(' · ');
+          return `<div class="wiki-status-row">
+            <div class="wiki-status-row-main">
+              <span class="wiki-status-row-name">${esc(w.label || w.path_source || 'wiki')}</span>
+              <span class="wiki-status-badge ${b.cls}">${esc(b.text)}</span>
+            </div>
+            <div class="wiki-status-row-meta">${esc(meta)}</div>
+          </div>`;
+        }).join('')}
+      </div>` : '';
+
   return `
     <div class="insights-card wiki-status-card" id="llmWikiStatusCard">
       <div class="wiki-status-head">
@@ -4526,11 +4578,12 @@ function _renderLlmWikiStatus(d) {
         <span class="wiki-status-badge ${badgeClass}">${esc(badgeText)}</span>
       </div>
       <div class="wiki-status-note">${esc(statusNote)}</div>
+      ${wikiRows}
       <div class="wiki-status-grid">
         <div><span>Enabled</span><strong>${status.enabled ? 'Yes' : 'No'}</strong></div>
-        <div><span>Entries</span><strong>${Number(status.entry_count || 0).toLocaleString()}</strong></div>
-        <div><span>Pages</span><strong>${Number(status.page_count || 0).toLocaleString()}</strong></div>
-        <div><span>raw/ files</span><strong>${Number(status.raw_source_count || 0).toLocaleString()}</strong></div>
+        <div><span>Entries</span><strong>${num(entries)}</strong></div>
+        <div><span>Pages</span><strong>${num(pages)}</strong></div>
+        <div><span>raw/ files</span><strong>${num(rawFiles)}</strong></div>
         <div><span>Last updated</span><strong>${esc(_formatLlmWikiTimestamp(status.last_updated))}</strong></div>
         <div><span>Last writer</span><strong>${esc(status.last_writer || 'Not available')}</strong></div>
       </div>
@@ -4548,6 +4601,22 @@ async function _openWikiBrowser() {
   const existing = document.getElementById('wikiBrowserOverlay');
   if (existing) { existing.style.display = 'flex'; return; }
 
+  // Which wikis exist? The status endpoint is the only source of the list, and
+  // what we send back is an INDEX — never a path — so the server stays the sole
+  // authority on what a wiki is.
+  let reports = [];
+  try {
+    const st = await api('/api/wiki/status');
+    reports = Array.isArray(st && st.wikis) ? st.wikis : [];
+  } catch (e) { reports = []; }
+
+  // Keep each available wiki's ORIGINAL index: the server resolves the index
+  // against its own order, so filtering must not renumber them.
+  const choices = reports
+    .map((w, i) => ({ idx: i, w }))
+    .filter(o => o.w && o.w.available);
+  let activeWiki = choices.length ? choices[0].idx : 0;
+
   const overlay = document.createElement('div');
   overlay.id = 'wikiBrowserOverlay';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999;';
@@ -4560,6 +4629,12 @@ async function _openWikiBrowser() {
   const panel = document.createElement('div');
   panel.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;width:min(720px,95vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;';
 
+  const selectorHtml = choices.length > 1
+    ? `<select id="wikiBrowserSelect" style="margin-top:8px;width:100%;padding:5px 8px;background:var(--input-bg,var(--bg));border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;box-sizing:border-box;">
+         ${choices.map(o => `<option value="${o.idx}"${o.idx === activeWiki ? ' selected' : ''}>${esc(o.w.label || ('wiki ' + (o.idx + 1)))} — ${Number(o.w.page_count || 0)} pages</option>`).join('')}
+       </select>`
+    : '';
+
   panel.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);">
       <strong style="font-size:14px;">${esc(t('wiki_browse'))}</strong>
@@ -4567,6 +4642,7 @@ async function _openWikiBrowser() {
     </div>
     <div style="padding:10px 16px;border-bottom:1px solid var(--border);">
       <input id="wikiBrowserSearch" type="text" placeholder="${esc(t('wiki_search_placeholder'))}" style="width:100%;padding:6px 10px;background:var(--input-bg,var(--bg));border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;box-sizing:border-box;" />
+      ${selectorHtml}
     </div>
     <div id="wikiBrowserList" style="flex:1;overflow-y:auto;padding:8px 0;min-height:80px;"></div>
     <div id="wikiBrowserContent" style="display:none;flex:1;overflow-y:auto;padding:16px;border-top:1px solid var(--border);"></div>`;
@@ -4577,6 +4653,7 @@ async function _openWikiBrowser() {
   const listEl = document.getElementById('wikiBrowserList');
   const contentEl = document.getElementById('wikiBrowserContent');
   const searchEl = document.getElementById('wikiBrowserSearch');
+  const selectEl = document.getElementById('wikiBrowserSelect');
   let _pages = [];
 
   function _renderWikiPageList(filter) {
@@ -4591,12 +4668,29 @@ async function _openWikiBrowser() {
     ).join('');
   }
 
+  async function _loadWikiPages() {
+    contentEl.style.display = 'none';
+    listEl.style.display = '';
+    listEl.innerHTML = '<div style="padding:12px 16px;color:var(--muted);font-size:13px;">Loading...</div>';
+    try {
+      const data = await api('/api/wiki/browse?wiki=' + encodeURIComponent(activeWiki));
+      _pages = Array.isArray(data && data.pages) ? data.pages : [];
+      if (!_pages.length) {
+        listEl.innerHTML = `<div style="padding:12px 16px;color:var(--muted);font-size:13px;">${esc(t('wiki_no_pages'))}</div>`;
+      } else {
+        _renderWikiPageList(searchEl.value);
+      }
+    } catch(e) {
+      listEl.innerHTML = `<div style="padding:12px 16px;color:var(--error,#f55);font-size:13px;">${esc(e.message || String(e))}</div>`;
+    }
+  }
+
   window._wikiBrowserOpenPage = async function(path) {
     contentEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:13px;">Loading...</div>';
     contentEl.style.display = 'block';
     listEl.style.display = 'none';
     try {
-      const data = await api('/api/wiki/page?path=' + encodeURIComponent(path));
+      const data = await api('/api/wiki/page?wiki=' + encodeURIComponent(activeWiki) + '&path=' + encodeURIComponent(path));
       if (typeof renderMarkdownPreviewContent === 'function') {
         contentEl.innerHTML = '<button onclick="window._wikiBrowserBack()" style="margin-bottom:10px;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--text);">&#8592; Back</button><div id="wikiBrowserMd"></div>';
         renderMarkdownPreviewContent({content: data.content, el: document.getElementById('wikiBrowserMd')});
@@ -4615,17 +4709,15 @@ async function _openWikiBrowser() {
 
   searchEl.addEventListener('input', () => _renderWikiPageList(searchEl.value));
 
-  try {
-    const data = await api('/api/wiki/browse');
-    _pages = Array.isArray(data && data.pages) ? data.pages : [];
-    if (!_pages.length) {
-      listEl.innerHTML = `<div style="padding:12px 16px;color:var(--muted);font-size:13px;">${esc(t('wiki_no_pages'))}</div>`;
-    } else {
-      _renderWikiPageList('');
-    }
-  } catch(e) {
-    listEl.innerHTML = `<div style="padding:12px 16px;color:var(--error,#f55);font-size:13px;">${esc(e.message || String(e))}</div>`;
+  if (selectEl) {
+    selectEl.addEventListener('change', () => {
+      activeWiki = Number(selectEl.value) || 0;
+      searchEl.value = '';
+      _loadWikiPages();
+    });
   }
+
+  await _loadWikiPages();
 }
 
 /**

@@ -11139,7 +11139,70 @@ def _handle_logs(handler, parsed) -> bool:
 # ── Insights endpoint ──────────────────────────────────────────────────────────
 
 _LLM_WIKI_DOCS_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/research/research-llm-wiki"
+# Canonical page sections, used when a wiki has no SCHEMA.md or declares no
+# page types. Wikis may declare their own set under a "## Page Types" heading
+# in SCHEMA.md — see _llm_wiki_page_dirs(). This tuple is the fallback, and
+# leaving it untouched is what keeps pre-existing wikis behaving identically.
 _LLM_WIKI_PAGE_DIRS = ("entities", "concepts", "comparisons", "queries")
+
+# "## Page Types" table parsing, mirroring the llm-wiki skill's format:
+#   - `compounds/` → `compound` — prose
+# Also accepts -> and : as the separator.
+_LLM_WIKI_PAGE_TYPES_HEADING = re.compile(r"^#{1,6}[ \t]*Page Types[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_LLM_WIKI_ANY_HEADING = re.compile(r"^#{1,6}[ \t]+\S", re.MULTILINE)
+_LLM_WIKI_PAGE_TYPE_ROW = re.compile(
+    r"^[-*]\s+`([a-z0-9][a-z0-9_-]*)/?`\s*(?:\u2192|->|:)\s*`?([a-z][a-z0-9_-]*)`?",
+    re.IGNORECASE | re.MULTILINE,
+)
+# A SCHEMA.md larger than this is not a schema; refuse to parse it.
+_LLM_WIKI_MAX_SCHEMA_BYTES = 1_000_000
+
+
+def _llm_wiki_page_dirs(wiki_path: Path) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Resolve a wiki's page sections from that wiki's own SCHEMA.md.
+
+    Returns ``(directories, {directory: declared_type})``. Falls back to
+    ``_LLM_WIKI_PAGE_DIRS`` whenever SCHEMA.md is absent, unreadable, oversized,
+    or declares no page types — so a wiki without a schema behaves exactly as it
+    did before page types became configurable.
+
+    Only *directory names* are taken from SCHEMA.md. Every containment, symlink,
+    and hardlink check in the walk below is unchanged and remains the
+    authoritative trust boundary: a hostile schema can at most name a directory,
+    which must still resolve inside the wiki root before anything is listed.
+    """
+    fallback = tuple(_LLM_WIKI_PAGE_DIRS)
+    schema = wiki_path / "SCHEMA.md"
+    try:
+        st = _llm_wiki_verified_status_file_stat(wiki_path, schema)
+        if st is None or st.st_size > _LLM_WIKI_MAX_SCHEMA_BYTES:
+            return fallback, {}
+        text = schema.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return fallback, {}
+
+    heading = _LLM_WIKI_PAGE_TYPES_HEADING.search(text)
+    if not heading:
+        return fallback, {}
+    rest = text[heading.end():]
+    next_heading = _LLM_WIKI_ANY_HEADING.search(rest)
+    body = rest[: next_heading.start()] if next_heading else rest
+
+    dirs: list[str] = []
+    types: dict[str, str] = {}
+    for match in _LLM_WIKI_PAGE_TYPE_ROW.finditer(body):
+        name = match.group(1).lower()
+        # A single path segment only — never a traversal, never raw/ or _archive/.
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            continue
+        if name in ("raw", "_archive"):
+            continue
+        if name not in types:
+            dirs.append(name)
+        types[name] = match.group(2).lower()
+    if not dirs:
+        return fallback, {}
+    return tuple(dirs), types
 
 
 def _llm_wiki_active_hermes_home() -> Path:
@@ -11224,6 +11287,128 @@ def _llm_wiki_resolve_path() -> tuple[Path, str, bool]:
     return Path(os.path.expandvars(raw)).expanduser(), source, configured
 
 
+def _llm_wiki_env_file_value(hermes_home: Path, key: str) -> str | None:
+    """Read one key from ``$HERMES_HOME/.env`` without importing dotenv."""
+    env_path = hermes_home / ".env"
+    if not env_path.exists() or not env_path.is_file():
+        return None
+    try:
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            found_key, value = stripped.split("=", 1)
+            if found_key.strip() != key:
+                continue
+            return value.strip().strip('"').strip("'") or None
+    except Exception:
+        return None
+    return None
+
+
+def _llm_wiki_config_path_list() -> list[str]:
+    """Return list-valued wiki paths from config (``skills.config.wiki.paths``)."""
+    try:
+        from api.config import get_config as _get_cfg
+        cfg = _get_cfg()
+    except Exception:
+        return []
+    out: list[str] = []
+    for dotted in ("skills.config.wiki.paths", "wiki.paths"):
+        cur: object = cfg
+        for part in dotted.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                cur = None
+                break
+            cur = cur[part]
+        if cur is None:
+            continue
+        if isinstance(cur, (list, tuple)):
+            out.extend(str(v) for v in cur if v)
+        elif isinstance(cur, str) and cur.strip():
+            out.append(cur)
+    return out
+
+
+def _llm_wiki_extra_path_sources() -> list[tuple[str, str]]:
+    """Additional wikis, opt-in via the *plural* knobs only.
+
+    Deliberately separate from :func:`_llm_wiki_resolve_path`. A single wiki
+    keeps exactly the precedence it always had, so adding multi-wiki support
+    cannot silently change which wiki an existing install reports.
+    """
+    hermes_home = _llm_wiki_active_hermes_home()
+    found: list[tuple[str, str]] = []
+    for raw, source in (
+        (os.getenv("WIKI_PATHS"), "WIKI_PATHS"),
+        (_llm_wiki_env_file_value(hermes_home, "WIKI_PATHS"), "WIKI_PATHS"),
+    ):
+        if raw:
+            found.append((raw, source))
+    for raw in _llm_wiki_config_path_list():
+        found.append((raw, "skills.config.wiki.paths"))
+    return found
+
+
+def _llm_wiki_resolve_paths() -> list[tuple[Path, str, bool]]:
+    """Resolve the primary wiki plus any explicitly-configured extras.
+
+    Always returns at least one entry, and ``[0]`` always matches
+    :func:`_llm_wiki_resolve_path` — so every existing single-wiki install
+    reports precisely what it reported before.
+    """
+    primary = _llm_wiki_resolve_path()
+    resolved = [primary]
+    seen = {str(primary[0])}
+
+    for raw, source in _llm_wiki_extra_path_sources():
+        # One knob may carry a comma- or newline-separated list.
+        for piece in re.split(r"[,\n]", raw):
+            piece = piece.strip().strip('"').strip("'")
+            if not piece:
+                continue
+            try:
+                path = Path(os.path.expandvars(piece)).expanduser()
+            except Exception:
+                continue
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append((path, source, True))
+    return resolved
+
+
+def _llm_wiki_resolve_indexed(raw_index: str | None) -> tuple[Path | None, bool]:
+    """Resolve a client-supplied wiki **index** against the configured wikis.
+
+    Deliberately index-based: the client never supplies a path, only a position
+    in the server's own resolved list, so multi-wiki browsing adds **no** new
+    path-injection surface. The index is bounds-checked here and the resulting
+    path is still subject to every containment check in the handlers below.
+
+    Returns ``(path, ok)``. An omitted/empty index means the primary wiki and
+    is routed through :func:`_llm_wiki_resolve_path` so existing single-wiki
+    callers — and tests that monkeypatch it — behave exactly as before. A
+    present-but-invalid index returns ``(None, False)`` so the caller can 400
+    rather than silently serving a different wiki than the one requested.
+    """
+    normalised = "" if raw_index is None else str(raw_index).strip()
+    if normalised in ("", "0"):
+        return _llm_wiki_resolve_path()[0], True
+    try:
+        wikis = _llm_wiki_resolve_paths()
+    except Exception:
+        return None, False
+    try:
+        idx = int(normalised)
+    except (TypeError, ValueError):
+        return None, False
+    if idx < 0 or idx >= len(wikis):
+        return None, False
+    return wikis[idx][0], True
+
+
 def _llm_wiki_safe_iso(ts: float | None) -> str | None:
     if not ts:
         return None
@@ -11269,7 +11454,7 @@ def _llm_wiki_page_files_cache_signature(wiki_path: Path) -> tuple:
     or disappearance also invalidates the cache.
     """
     sig = []
-    for section in _LLM_WIKI_PAGE_DIRS:
+    for section in _llm_wiki_page_dirs(wiki_path)[0]:
         section_dir = wiki_path / section
         try:
             st = section_dir.lstat()
@@ -11296,7 +11481,7 @@ def _llm_wiki_page_files_uncached(wiki_path: Path) -> list[Path]:
         return not any(part.startswith(".") for part in rel.parts)
 
     iterated = 0
-    for dirname in _LLM_WIKI_PAGE_DIRS:
+    for dirname in _llm_wiki_page_dirs(wiki_path)[0]:
         section = wiki_path / dirname
         if not section.exists() or not section.is_dir():
             continue
@@ -11586,30 +11771,48 @@ def _llm_wiki_last_writer(
     return "ai-agent"
 
 
-def _build_llm_wiki_status() -> dict:
-    """Return private-safe LLM Wiki status metadata without reading page bodies."""
+def _llm_wiki_safe_label(wiki_path: Path) -> str:
+    """A non-path display label for a wiki.
+
+    The status payload deliberately never carries a wiki's filesystem path
+    (see ``test_issue1257_llm_wiki_status``), so multi-wiki rows are
+    distinguished by the leaf directory name only.
+    """
     try:
-        wiki_path, path_source, path_configured = _llm_wiki_resolve_path()
-        base = {
-            "available": False,
-            "enabled": False,
-            "status": "missing",
-            "entry_count": 0,
-            "page_count": 0,
-            "raw_source_count": 0,
-            "last_updated": None,
-            "last_writer": "ai-agent",
-            "path_configured": path_configured,
-            "path_source": path_source,
-            "toggle_available": False,
-            "toggle_reason": "Hermes Agent exposes WIKI_PATH/wiki.path for location, but no stable on/off config flag is currently available.",
-            "docs_url": _LLM_WIKI_DOCS_URL,
-        }
+        name = wiki_path.name
+    except Exception:
+        name = ""
+    return name or "wiki"
+
+
+def _llm_wiki_status_for(wiki_path: Path, path_source: str, path_configured: bool) -> dict:
+    """Per-wiki status. Never raises; returns the original single-wiki shape."""
+    base = {
+        "available": False,
+        "enabled": False,
+        "status": "missing",
+        "entry_count": 0,
+        "page_count": 0,
+        "raw_source_count": 0,
+        "last_updated": None,
+        "last_writer": "ai-agent",
+        "path_configured": path_configured,
+        "path_source": path_source,
+        "label": _llm_wiki_safe_label(wiki_path),
+        "page_dirs": list(_LLM_WIKI_PAGE_DIRS),
+        "toggle_available": False,
+        "toggle_reason": "Hermes Agent exposes WIKI_PATH/wiki.path for location, but no stable on/off config flag is currently available.",
+        "docs_url": _LLM_WIKI_DOCS_URL,
+    }
+    try:
         if not wiki_path.exists():
             return base
         if not wiki_path.is_dir():
             base["status"] = "not_directory"
             return base
+
+        page_dirs, _page_types = _llm_wiki_page_dirs(wiki_path)
+        base["page_dirs"] = list(page_dirs)
 
         allowlisted_entries = _llm_wiki_allowlisted_entries(wiki_path)
         verified_page_entries: list[tuple[Path, tuple[int, int], os.stat_result]] = []
@@ -11646,22 +11849,35 @@ def _build_llm_wiki_status() -> dict:
         })
         return base
     except Exception as exc:
-        return {
-            "available": False,
-            "enabled": False,
-            "status": "error",
-            "entry_count": 0,
-            "page_count": 0,
-            "raw_source_count": 0,
-            "last_updated": None,
-            "last_writer": "ai-agent",
-            "path_configured": False,
-            "path_source": "unknown",
-            "toggle_available": False,
-            "toggle_reason": "Unable to inspect LLM Wiki status safely.",
-            "docs_url": _LLM_WIKI_DOCS_URL,
-            "error": type(exc).__name__,
-        }
+        base["status"] = "error"
+        base["toggle_reason"] = "Unable to inspect LLM Wiki status safely."
+        base["error"] = type(exc).__name__
+        return base
+
+
+def _build_llm_wiki_status() -> dict:
+    """Aggregate status across every configured wiki.
+
+    The top-level keys keep the original single-wiki shape and describe the
+    *primary* wiki, so existing consumers are unaffected. Multi-wiki detail
+    rides alongside: ``wikis`` (one report per configured wiki) and the
+    ``*_total`` sums. A single-wiki install therefore sees a superset of the
+    payload it saw before, with identical values.
+    """
+    try:
+        resolved = _llm_wiki_resolve_paths()
+    except Exception:
+        resolved = []
+    if not resolved:
+        resolved = [(Path(os.path.expandvars("~/wiki")).expanduser(), "default", False)]
+
+    reports = [_llm_wiki_status_for(path, source, configured) for path, source, configured in resolved]
+    primary = dict(reports[0])
+    primary["wikis"] = reports
+    primary["wiki_count"] = len(reports)
+    for key in ("entry_count", "page_count", "raw_source_count"):
+        primary[f"{key}_total"] = sum(int(r.get(key, 0) or 0) for r in reports)
+    return primary
 
 
 def _handle_llm_wiki_status(handler, parsed) -> bool:
@@ -13130,7 +13346,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/wiki/status":
         return _handle_llm_wiki_status(handler, parsed)
     if parsed.path == "/api/wiki/browse":
-        wiki_root, _, _ = _llm_wiki_resolve_path()
+        wiki_root, wiki_ok = _llm_wiki_resolve_indexed(
+            parse_qs(parsed.query or "").get("wiki", [None])[0]
+        )
+        if not wiki_ok:
+            return bad(handler, "Unknown wiki", status=400)
         if not wiki_root or not os.path.isdir(wiki_root):
             return bad(handler, "Wiki not configured or directory not found", status=404)
         allowlisted_entries = _llm_wiki_allowlisted_entries(Path(wiki_root))
@@ -13145,8 +13365,11 @@ def handle_get(handler, parsed) -> bool:
             pages.append({"name": Path(rel_path).name, "path": rel_path, "size": st.st_size, "mtime": int(st.st_mtime)})
         return j(handler, {"pages": pages})
     if parsed.path == "/api/wiki/page":
-        wiki_root, _, _ = _llm_wiki_resolve_path()
-        page_path = parse_qs(parsed.query or "").get("path", [""])[0]
+        _wiki_qs = parse_qs(parsed.query or "")
+        wiki_root, wiki_ok = _llm_wiki_resolve_indexed(_wiki_qs.get("wiki", [None])[0])
+        if not wiki_ok:
+            return bad(handler, "Unknown wiki", status=400)
+        page_path = _wiki_qs.get("path", [""])[0]
         if not wiki_root or not page_path:
             return bad(handler, "Wiki not configured or path not provided", status=400)
         if "\\" in page_path:
