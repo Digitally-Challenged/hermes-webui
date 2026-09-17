@@ -4114,7 +4114,7 @@ def _lmstudio_model_reasoning_options(
         )
 
     try:
-        from hermes_cli.models import (
+        from hermes_cli.models_local import (
             lmstudio_model_reasoning_options as _cli_lmstudio_model_reasoning_options,
         )
     except Exception:
@@ -4134,7 +4134,7 @@ def _lmstudio_model_reasoning_options(
         )
     except (TypeError, AttributeError):
         logger.warning(
-            "hermes_cli.lmstudio_model_reasoning_options has an unexpected signature; "
+            "hermes_cli.models_local.lmstudio_model_reasoning_options has an unexpected signature; "
             "falling back to the built-in LM Studio reasoning probe",
             exc_info=True,
         )

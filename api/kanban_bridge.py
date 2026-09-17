@@ -33,6 +33,16 @@ def _kb():
     return kb
 
 
+def _kb_connect():
+    """Lazily import hermes_cli.kanban_db_connect -- the canonical home of
+    ``connect`` and ``connect_closing`` since the Sep 2026 kanban_db split.
+    Importing it directly keeps this bridge off the agent's revert-scheduled
+    plugin-compat shim (``hermes_cli.kanban_db.__getattr__``)."""
+    from hermes_cli import kanban_db_connect as kb_connect
+
+    return kb_connect
+
+
 def _resolve_board(parsed):
     """Validate and normalise a ?board=<slug> query param.
 
@@ -84,8 +94,9 @@ def _conn(board=None):
     """Initialize the kanban DB for the given board slug and return a context manager
     that yields a sqlite connection and CLOSES it on exit.
 
-    Must be ``kb.connect_closing`` — a raw ``kb.connect()`` connection used as
-    ``with _conn(...) as conn:`` only gets sqlite3's transaction-scope context
+    Must be ``hermes_cli.kanban_db_connect.connect_closing`` -- a raw ``connect()``
+    connection used as ``with _conn(...) as conn:`` only gets sqlite3's transaction-scope
+    context
     manager, which never closes the file descriptor. In this long-lived server
     that leaks one FD per request and pins stale WAL snapshots (FDs to deleted
     ``-wal``/``-shm`` files), which starves SQLite checkpoints on the shared
@@ -93,13 +104,14 @@ def _conn(board=None):
     """
     kb = _kb()
     kb.init_db(board=board)
-    closing = getattr(kb, "connect_closing", None)
+    kb_connect = _kb_connect()
+    closing = getattr(kb_connect, "connect_closing", None)
     if closing is not None:
         return closing(board=board)
     # Older kanban_db builds (and lightweight test doubles) without
     # connect_closing: fall back to the raw connection; sqlite3's own
     # context manager at least scopes the transaction.
-    return kb.connect(board=board)
+    return kb_connect.connect(board=board)
 
 
 def _obj_dict(value):
@@ -787,7 +799,7 @@ def _board_counts_for_slug(slug):
     if not kb.board_exists(slug):
         return {}
     try:
-        conn = kb.connect(board=slug)
+        conn = _kb_connect().connect(board=slug)
     except Exception:
         return {}
     try:
@@ -1010,7 +1022,7 @@ def _kanban_sse_fetch_new(board, cursor):
     client."""
     kb = _kb()
     # Guard against a board that's been archived/removed mid-stream:
-    # kb.connect(board=<slug>) auto-materialises the directory + DB on
+    # hermes_cli.kanban_db_connect.connect(board=<slug>) auto-materialises the directory + DB on
     # first call, which would silently un-archive a board that was just
     # removed. Skip the fetch when the board no longer exists.
     if board is not None:
@@ -1021,7 +1033,7 @@ def _kanban_sse_fetch_new(board, cursor):
         if board != default_slug and not kb.board_exists(board):
             return cursor, []
     try:
-        conn = kb.connect(board=board)
+        conn = _kb_connect().connect(board=board)
     except Exception:
         return cursor, []
     try:

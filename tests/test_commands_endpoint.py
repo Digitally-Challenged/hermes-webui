@@ -24,6 +24,8 @@ def _install_fake_mcp_tool(monkeypatch, shutdown, discover, servers=None, lock=N
     mcp_tool._lock = lock if lock is not None else threading.Lock()
     monkeypatch.setitem(sys.modules, "tools", tools_pkg)
     monkeypatch.setitem(sys.modules, "tools.mcp_tool", mcp_tool)
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool_discovery", mcp_tool)
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool_lifecycle", mcp_tool)
     return mcp_tool
 
 

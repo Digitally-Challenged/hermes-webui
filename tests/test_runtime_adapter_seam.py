@@ -2,6 +2,8 @@ import importlib
 import io
 import queue
 
+import pytest
+
 from tests.conftest import requires_agent_modules
 
 
@@ -813,3 +815,25 @@ def test_runner_runtime_adapter_controls_are_bounded_and_do_not_use_legacy_state
         assert result.accepted is False
         assert result.status == "unsupported"
         assert "not supported by this runner backend" in (result.safe_message or "")
+
+
+@requires_agent_modules
+def test_webui_uses_canonical_modules_not_plugin_compat_shim():
+    """The Sep-2026 agent decomposition kept old import paths alive only through
+    PLUGIN-COMPAT ``__getattr__`` shims that are reverted on a fixed date. If the
+    webui imports a moved symbol through a shim, that revert becomes a silent
+    ImportError/wrong-path regression. ``hermes_cli.plugin_compat.scan_plugin`` is
+    the agent's own AST scanner for exactly this, so use it as the source of truth:
+    the webui's ``api/`` package must import decomposed symbols from their
+    canonical modules, never via the facade's compat shim.
+    """
+    compat = pytest.importorskip("hermes_cli.plugin_compat")
+    from pathlib import Path
+
+    api_dir = Path(__file__).resolve().parents[1] / "api"
+    hits = compat.scan_plugin(api_dir)
+    assert hits == [], (
+        "webui api/ must not import names via the agent's revert-scheduled "
+        "PLUGIN-COMPAT shim; import from the canonical module instead:\n"
+        + "\n".join(f"  {h.file}:{h.line} {h.old} -> {h.new}" for h in hits)
+    )

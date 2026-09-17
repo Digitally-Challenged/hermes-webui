@@ -361,8 +361,10 @@ def _load_bridge(monkeypatch):
     fake_kanban = FakeKanbanDB()
     fake_hermes_cli = types.ModuleType("hermes_cli")
     fake_hermes_cli.kanban_db = fake_kanban
+    fake_hermes_cli.kanban_db_connect = fake_kanban
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake_kanban)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db_connect", fake_kanban)
     import api.kanban_bridge as bridge
 
     return importlib.reload(bridge)
@@ -725,8 +727,10 @@ def test_board_counts_returns_empty_for_nonexistent_board(monkeypatch):
 
     fake_hermes_cli = types.ModuleType("hermes_cli")
     fake_hermes_cli.kanban_db = fake_kanban
+    fake_hermes_cli.kanban_db_connect = fake_kanban
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake_kanban)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db_connect", fake_kanban)
     import api.kanban_bridge as bridge
     bridge = importlib.reload(bridge)
 
@@ -743,8 +747,10 @@ def test_board_counts_returns_real_counts_for_populated_board(monkeypatch):
     fake_kanban = FakeKanbanDB()
     fake_hermes_cli = types.ModuleType("hermes_cli")
     fake_hermes_cli.kanban_db = fake_kanban
+    fake_hermes_cli.kanban_db_connect = fake_kanban
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake_kanban)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db_connect", fake_kanban)
     import api.kanban_bridge as bridge
     bridge = importlib.reload(bridge)
 

@@ -28556,12 +28556,12 @@ def _parse_mcp_enabled(value) -> bool:
 def _mcp_runtime_status_by_name() -> dict[str, dict]:
     """Return already-known MCP runtime status without starting servers.
 
-    ``tools.mcp_tool.get_mcp_status()`` only reads the existing MCP registry and
+    ``tools.mcp_tool_discovery.get_mcp_status()`` only reads the existing MCP registry and
     configuration; it does not probe or spawn MCP subprocesses. If Hermes Agent
     is unavailable, fall back to an empty map so the API remains safe.
     """
     try:
-        from tools.mcp_tool import get_mcp_status
+        from tools.mcp_tool_discovery import get_mcp_status
         statuses = get_mcp_status()
     except Exception:
         return {}

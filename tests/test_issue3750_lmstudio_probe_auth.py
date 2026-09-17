@@ -350,6 +350,7 @@ display:
 
     monkeypatch.setitem(sys.modules, "hermes_cli", type("HermesCli", (), {})())
     monkeypatch.setitem(sys.modules, "hermes_cli.models", _CliModule)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models_local", _CliModule)
 
     status = config.get_reasoning_status()
 
@@ -396,6 +397,7 @@ display:
 
     monkeypatch.setitem(sys.modules, "hermes_cli", type("HermesCli", (), {})())
     monkeypatch.setitem(sys.modules, "hermes_cli.models", _CliModule)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models_local", _CliModule)
     monkeypatch.setattr(
         config.logger,
         "warning",
