@@ -3589,6 +3589,26 @@ def _capture_turn_served_model(s, agent) -> str | None:
     return _used_model
 
 
+def _backfill_turn_gateway_routing(messages, *, previous_assistant_count, routing):
+    """Label every assistant message of a finished turn with the turn routing.
+
+    The finalize loop above stamps ``_gatewayRouting`` on the turn's *last*
+    assistant message only, so mid-turn answers (visible interim texts before
+    tool calls) render without a model after reload. Backfill the rest of the
+    turn here. Messages that already carry routing (the final answer) keep it;
+    prior-turn messages are skipped via ``previous_assistant_count``.
+    """
+    if not messages or not routing:
+        return
+    for seq, msg in enumerate(
+        m for m in messages if isinstance(m, dict) and m.get('role') == 'assistant'
+    ):
+        if seq < previous_assistant_count:
+            continue  # prior turn — never touch its label
+        if not msg.get('_gatewayRouting'):
+            msg['_gatewayRouting'] = routing
+
+
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
@@ -15309,6 +15329,14 @@ def _run_agent_streaming(
                                     'cache_hit_percent': turn_cache_hit_percent,
                                 }
                             break
+                    _backfill_turn_gateway_routing(
+                        s.messages,
+                        previous_assistant_count=sum(
+                            1 for _pm in (_previous_messages or [])
+                            if isinstance(_pm, dict) and _pm.get('role') == 'assistant'
+                        ),
+                        routing=_gateway_routing,
+                    )
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
                 # s.save() for the same reason as the reasoning trace above.

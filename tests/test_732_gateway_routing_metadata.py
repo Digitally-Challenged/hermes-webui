@@ -103,3 +103,42 @@ def test_frontend_copies_and_formats_gateway_metadata_without_absent_noise():
     assert "if(!routing)return''" in UI_JS.replace(" ", "")
     assert "_formatSessionModelWithGateway" in SESSIONS_JS
     assert ".msg-model-warning-inline" in STYLE_CSS
+
+
+def test_backfill_labels_every_assistant_message_of_the_turn():
+    # Mid-turn answers (interim texts before tool calls) must carry a model
+    # label too; the final answer keeps its authoritative result metadata.
+    from api.streaming import _backfill_turn_gateway_routing
+
+    routing = {"used_model": "model-a"}
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "interim one"},
+        {"role": "tool", "content": "x"},
+        {"role": "assistant", "content": "interim two"},
+        {"role": "tool", "content": "y"},
+        {"role": "assistant", "content": "final"},
+    ]
+    msgs[5]["_gatewayRouting"] = {"used_model": "final-model"}
+
+    _backfill_turn_gateway_routing(msgs, previous_assistant_count=0, routing=routing)
+
+    assert msgs[1]["_gatewayRouting"] == routing
+    assert msgs[3]["_gatewayRouting"] == routing
+    assert msgs[5]["_gatewayRouting"] == {"used_model": "final-model"}
+
+
+def test_backfill_skips_prior_turns_and_no_routing_turns():
+    from api.streaming import _backfill_turn_gateway_routing
+
+    msgs = [
+        {"role": "assistant", "content": "previous turn"},
+        {"role": "assistant", "content": "current turn"},
+    ]
+    _backfill_turn_gateway_routing(msgs, previous_assistant_count=1, routing={"used_model": "m"})
+    assert "_gatewayRouting" not in msgs[0]
+    assert msgs[1]["_gatewayRouting"]["used_model"] == "m"
+
+    empty = [{"role": "assistant", "content": "x"}]
+    _backfill_turn_gateway_routing(empty, previous_assistant_count=0, routing=None)
+    assert "_gatewayRouting" not in empty[0]
