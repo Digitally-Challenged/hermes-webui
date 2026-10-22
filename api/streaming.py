@@ -3612,6 +3612,28 @@ def _active_turn_checkpoint_index(messages, identity) -> int | None:
     return found
 
 
+def _turn_prior_assistant_count(messages, previous_messages, active_turn_identity) -> int:
+    """Assistant messages that belong to turns earlier than the active one.
+
+    Shared boundary for reasoning settlement and the routing backfill: the
+    checkpoint user row ``_active_turn_authority`` captured before pending
+    fields were cleared. Assistants before that row are a previous turn.
+
+    Without a checkpoint there is no boundary worth trusting, so the pre-run
+    ``previous_messages`` snapshot decides — both callers use this one rule so
+    they cannot drift apart.
+    """
+    checkpoint_at = _active_turn_checkpoint_index(messages, active_turn_identity)
+    source = (
+        (messages or [])[:checkpoint_at]
+        if checkpoint_at is not None
+        else (previous_messages or [])
+    )
+    return sum(
+        1 for m in source if isinstance(m, dict) and m.get('role') == 'assistant'
+    )
+
+
 def _backfill_turn_gateway_routing(messages, *, routing, active_turn_identity):
     """Label every assistant message of a finished turn with the turn routing.
 
@@ -4736,22 +4758,8 @@ def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
     tool_call_segments = {k: list(v) for k, v in (tool_call_segments or {}).items()}
     interim_segments = list(interim_segments or [])
     _positional = not tool_call_segments and not interim_segments
-    # The checkpoint user row is the same boundary the routing backfill uses.
-    # A pre-run assistant count misses historical answers that recovery inserts
-    # before that row, so those answers would inherit this turn's reasoning.
-    _checkpoint_at = _active_turn_checkpoint_index(
-        s.messages, active_turn_identity
-    )
-    if _checkpoint_at is not None:
-        _prev_asst = sum(
-            1 for m in s.messages[:_checkpoint_at]
-            if isinstance(m, dict) and m.get('role') == 'assistant'
-        )
-    else:
-        _prev_asst = sum(
-            1 for m in (_previous_messages or [])
-            if isinstance(m, dict) and m.get('role') == 'assistant'
-        )
+    # Same boundary as the routing backfill: checkpoint row, else pre-run snapshot.
+    _prev_asst = _turn_prior_assistant_count(s.messages, _previous_messages, active_turn_identity)
     _total_asst = sum(1 for m in s.messages if isinstance(m, dict) and m.get('role') == 'assistant')
     _asst_count = 0
     _step_ids = _turn_step_tool_call_ids(s.messages, _prev_asst, list(tool_start_order or []))
