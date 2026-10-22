@@ -1680,6 +1680,17 @@ def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
     ]
 
 
+def _configured_model_explicit_labels(raw_models: object) -> dict[str, str]:
+    """Read explicit labels without changing custom catalogs' fallback labels."""
+    if not isinstance(raw_models, list):
+        return {}
+    labelled = [
+        row for row in raw_models
+        if isinstance(row, dict) and str(row.get("label") or "").strip()
+    ]
+    return {row["id"]: row["label"] for row in _configured_model_options(labelled)}
+
+
 def _merge_model_option_rows(*row_lists: object) -> list[dict[str, str]]:
     """Merge picker option rows from multiple sources, first-seen order, deduped by id.
 
@@ -7741,8 +7752,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                 if configured_id not in configured_ids:
                     configured_ids.append(configured_id)
 
+            configured_labels = _configured_model_explicit_labels(entry.get("models"))
             for configured_id in configured_ids:
-                label = _get_label_for_model(configured_id, [])
+                label = configured_labels.get(configured_id) or _get_label_for_model(configured_id, [])
                 if provider_slug == "custom":
                     custom_group_models.append({"id": configured_id, "label": label})
                 else:
@@ -10670,6 +10682,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
 
                 # Collect configured model IDs as a fallback/sticky entry after live discovery.
+                _cp_labels = _configured_model_explicit_labels(_cp.get("models"))
                 _cp_model_ids: list[str] = []
                 _cp_model = _cp.get("model", "")
                 if _cp_model:
@@ -10681,7 +10694,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
                     if _cp_model and _dedup_key not in _seen_custom_ids:
-                        _cp_label = _get_label_for_model(_cp_model, [])
+                        _cp_label = _cp_labels.get(_cp_model) or _get_label_for_model(_cp_model, [])
                         _seen_custom_ids.add(_dedup_key)
                         if _slug:
                             detected_providers.add(_slug)

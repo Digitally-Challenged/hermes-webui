@@ -54,6 +54,44 @@ catalog probe. `providers.only_configured` compares native mapping keys in this
 same stable `custom:<slug>` namespace, including non-active bare-key entries;
 built-in/plugin aliases and legacy-store visibility keep their existing rules.
 
+### Native identity and persisted-input compatibility
+
+New cards, catalog `provider_id` values and unqualified native ownership scans
+use the canonical named-custom identity `custom:<slug>`, including when the
+native mapping uses a bare key such as `providers.myprov`. A native key named
+`custom-configured` therefore appears as `custom:custom-configured`, not as a
+reserved sentinel for the default endpoint. Non-active picker options carry
+that identity as `@custom:<slug>:<model>`; active-provider options may stay bare
+while the session retains their provider separately. Editable labels do not
+change this identity or split colon-tagged model IDs. Configured object-list
+model rows using `id`, `model`, or `name` retain their explicit `label` when
+materialized as configured fallback rows in cold catalogs and in the
+configured-fallback stage of refreshed catalogs. Live/discovered rows keep
+their existing precedence: if an active-endpoint prewarm or live probe has already
+supplied the same model, its upstream label may win. This change does not reorder
+live and configured model rows.
+
+This is a read-only normalization, not a config/session migration. Existing
+bare mapping keys, active-provider values and persisted explicit inputs such as
+`model_provider: myprov` / `@myprov:<model>` remain accepted and route to the
+same owned endpoint with the complete model ID. An explicit historical hint
+may retain its bare spelling in the resolved triple; that does not make it a
+second identity newly advertised by the catalog. Built-in/plugin aliases keep
+their existing routing rules. The bare `custom` lane remains distinct: when it
+represents the configured default endpoint, a named provider cannot take its
+URL or credential, even if its name resembles an internal lane description.
+
+### Selected-owner metadata boundary
+
+Context lookup reads the current request/profile config on each call. It passes
+only the selected owner's custom-provider metadata to downstream resolvers,
+not the full raw list. Two owners sharing a URL and model still have separate
+context overrides and keys; an explicit unknown owner receives neither owner's
+metadata or key. The selected projection's contents and ownership are the
+contract, not its Python list identity. Global `model.context_length` remains
+default-model-only; null/malformed provider stores do not authorize borrowing
+another provider's connection. Reading these views never rewrites either store.
+
 ## Why the endpoint filters at all
 
 OpenAI-compatible gateways (New-API-style aggregators, LM Studio, Ollama
