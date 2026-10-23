@@ -1440,19 +1440,21 @@ def _get_provider_api_key(provider_id: str) -> str | None:
     if provider_id.startswith("custom:"):
         from api.config import (
             _select_custom_provider_record, _unique_custom_provider_entry,
-            _custom_provider_slug_key,
+            _custom_provider_slug_key, _custom_provider_identity_disabled,
         )
 
         cfg = get_config()
+        if _custom_provider_identity_disabled(provider_id, cfg):
+            return None
         _select_custom_provider_record(provider_id, _custom_provider_slug_key(provider_id), cfg)
         entry = _unique_custom_provider_entry(
             _custom_provider_entries(cfg), _custom_provider_slug_key(provider_id),
         )
-        if entry is None:
-            return None
-        key = _resolve_custom_record_key(entry.get("api_key"), entry.get("key_env"), provider_id)
-        if key:
-            return key
+        if entry is not None:
+            key = _resolve_custom_record_key(entry.get("api_key"), entry.get("key_env"), provider_id)
+            if key:
+                return key
+        # No presentation row does not rule out an explicitly owned pool key.
         for pooled in _pool_entry_payloads(provider_id):
             if not _pool_entry_currently_unusable(pooled):
                 key = str(pooled.get("runtime_api_key") or pooled.get("agent_key") or pooled.get("access_token") or "").strip()

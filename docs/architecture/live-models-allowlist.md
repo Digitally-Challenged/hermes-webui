@@ -46,6 +46,13 @@ config identity may still browse its explicitly persisted pool. Credential
 references are resolved within the request's profile environment, without
 borrowing a process-global key for an empty named profile.
 
+Named-custom key/capability readers likewise allow an explicitly owned pool
+without a presentation row. Raw disabled/ambiguous identity checks run before
+pool access. A configured row's key retains precedence; usable pool entries
+prefer `runtime_api_key`, then `agent_key`, then `access_token`. An absent own
+credential never authorizes another provider's or profile's key, a default
+endpoint's key, or ambient/process credentials.
+
 Forced `/api/models` refreshes also probe non-active named/native discovered
 snapshots when discovery is allowed, merge live IDs with saved IDs in the
 existing picker ordering, and retain saved IDs if probing fails. Explicit
