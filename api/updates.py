@@ -794,18 +794,17 @@ def _order_stable_tags(tags):
     the version number, and neither can move a series past a newer one because
     the outer key only compares series.
     """
-    ordem_dos_grupos = []
     por_grupo = {}
     for tag in tags:
         serie = _stable_series(tag)
         if serie not in por_grupo:
             por_grupo[serie] = []
-            ordem_dos_grupos.append(serie)
         por_grupo[serie].append(tag)
     ordenados = []
-    for serie in ordem_dos_grupos:
+    for serie in sorted(por_grupo, key=lambda s: (s != 'v2026', int(s[1:]) if s[1:].isdigit() else -1), reverse=True):
         ordenados.extend(sorted(por_grupo[serie], key=_release_version_key, reverse=True))
     return ordenados
+
 
 
 def _normalize_channel(channel) -> str:

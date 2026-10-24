@@ -511,3 +511,37 @@ def test_stable_annotated_and_lightweight_tags_rank_by_version_not_by_date(tmp_p
     assert raw[0] == 'v0.52.1', f'fixture must reproduce the inversion, got {raw}'
 
     assert updates._release_tags(repo, 'stable') == ['v0.52.2', 'v0.52.1']
+
+
+def test_stable_cross_major_tied_timestamp_ranks_higher_major_first(tmp_path):
+    """Cross-major releases with tied timestamp or default refname ordering must rank higher major first."""
+    repo = _tag_repo_at(tmp_path, 'cross-major-tied', [
+        ('v0.52.113', '2026-10-10T12:00:00Z', None),
+        ('v1.0.0', '2026-10-10T12:00:00Z', None),
+    ])
+    assert updates._release_tags(repo, 'stable') == ['v1.0.0', 'v0.52.113']
+
+    _git(repo, 'checkout', '-q', 'v0.52.113')
+    info = updates._check_repo_release(repo, 'webui', 'stable')
+    assert info is not None
+    assert info['behind'] == 1
+    assert info['current_version'] == 'v0.52.113'
+    assert info['latest_version'] == 'v1.0.0'
+    assert updates._select_apply_compare_ref(repo, 'stable', 'webui') == 'v1.0.0'
+
+
+def test_stable_cross_major_older_major_annotated_later_ranks_higher_major_first(tmp_path):
+    """An older-major annotated tag dated later must not outrank a descendant higher-major lightweight release."""
+    repo = _tag_repo_at(tmp_path, 'cross-major-annotated', [
+        ('v0.52.113', '2026-10-10T10:00:00Z', '2026-10-11T12:00:00Z'),
+        ('v1.0.0', '2026-10-10T12:00:00Z', None),
+    ])
+    assert updates._release_tags(repo, 'stable') == ['v1.0.0', 'v0.52.113']
+
+    _git(repo, 'checkout', '-q', 'v0.52.113')
+    info = updates._check_repo_release(repo, 'webui', 'stable')
+    assert info is not None
+    assert info['behind'] == 1
+    assert info['current_version'] == 'v0.52.113'
+    assert info['latest_version'] == 'v1.0.0'
+    assert updates._select_apply_compare_ref(repo, 'stable', 'webui') == 'v1.0.0'
