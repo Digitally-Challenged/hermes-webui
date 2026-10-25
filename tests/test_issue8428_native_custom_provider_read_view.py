@@ -776,7 +776,12 @@ def test_metadata_only_native_entry_remains_readable_without_claiming_connection
     bind(monkeypatch, data)
     assert [m["id"] for m in custom_cards()[0]["models"]] == [MODEL]
     for catalog in (config._static_models_catalog_without_live_probes(), config.get_available_models(force_refresh=True)):
-        assert [m["id"] for m in group(catalog)["models"]] == [f"@{PID}:{MODEL}"]
+        found = [g for g in catalog["groups"] if g["provider_id"] == PID]
+        # Preserve the older #1970 bare models-only visibility rule. Explicit
+        # native custom: keys remain intentional catalog declarations.
+        assert len(found) == int(native_key == PID)
+        if found:
+            assert [m["id"] for m in found[0]["models"]] == [f"@{PID}:{MODEL}"]
     assert config.resolve_custom_provider_bundle(PID)["status"] == config.CUSTOM_SELECTION_MISSING
 
 
@@ -986,4 +991,133 @@ def test_native_ambiguity_isolated_from_safe_readers_and_live(monkeypatch, confl
     assert live(PID)["models"] == []
     assert live("openai")["provider"] == "openai"
     assert requests == []
+    assert data == before
+
+
+@pytest.mark.parametrize("producer", ["cold", "refreshed"])
+@pytest.mark.parametrize("native_key", ["Snake_Case", "custom:snake_case", "Custom:Snake_Case"])
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("only_configured", [False, True])
+@pytest.mark.parametrize("connected", [False, True])
+def test_native_catalog_keeps_identity_and_models_only_admission(
+    monkeypatch, outbound_attempts, producer, native_key, active, only_configured, connected,
+):
+    pid = "custom:snake_case"
+    record = {"name": "Editable Label", "models": [{"id": "model:tag", "label": "Exact Model Label"}]}
+    if connected:
+        record.update({"api": URL, "api_key": "synthetic-owned", "opaque_metadata": {"keep": True}})
+    data = {
+        "model": {"provider": native_key if active else "openai", "default": "model:tag" if active else "gpt-5.4"},
+        "providers": {native_key: record, "only_configured": only_configured},
+    }
+    before = copy.deepcopy(data)
+    bind(monkeypatch, data)
+    # Readers retain metadata without making a connection or persisting a view.
+    entries = config._custom_provider_entries(data)
+    assert len(entries) == 1
+    assert config._custom_provider_slug_from_name(entries[0]["name"]) == pid
+    cards = [p for p in providers.get_providers()["providers"] if p["id"] == pid]
+    assert len(cards) == 1
+    assert cards[0]["display_name"] == "Editable Label"
+    assert cards[0]["has_key"] is connected
+    catalog = (config._static_models_catalog_without_live_probes() if producer == "cold"
+               else config.get_available_models(force_refresh=True))
+    found = [g for g in catalog["groups"] if g["provider_id"] == pid]
+    visible = connected or active or native_key.lower().startswith("custom:")
+    assert len(found) == int(visible)
+    assert not {"snake-case", "snake_case", "custom:snake-case", "custom:only_configured"}.intersection(
+        g["provider_id"] for g in catalog["groups"]
+    )
+    if found:
+        assert found[0]["provider"] == "Editable Label"
+        assert found[0]["models"] == [{"id": "model:tag" if active else f"@{pid}:model:tag", "label": "Exact Model Label"}]
+    bundle = config.resolve_custom_provider_bundle(pid)
+    if connected:
+        assert (bundle["base_url"], bundle["api_key"]) == (URL, "synthetic-owned")
+        assert bundle["record"]["opaque_metadata"] == {"keep": True}
+        assert config.resolve_model_provider(f"@{pid}:model:tag") == ("model:tag", pid, URL)
+    else:
+        assert bundle["status"] == config.CUSTOM_SELECTION_MISSING
+        assert (bundle["base_url"], bundle["api_key"]) == (None, None)
+    assert data == before
+
+
+@pytest.mark.parametrize("producer", ["cold", "refreshed"])
+def test_generic_custom_defaults_do_not_advertise_named_custom(monkeypatch, outbound_attempts, producer):
+    data = {
+        "model": {"provider": "custom", "default": "default-model"},
+        "providers": {"custom": {"api_key": "synthetic-default", "models": ["default-model"]}},
+    }
+    bind(monkeypatch, data)
+    before = copy.deepcopy(data)
+    assert config._custom_provider_entries(data) == []
+    assert config._resolve_configured_provider_id("custom", data) == "custom"
+    assert not any(p["id"] == "custom:custom" for p in providers.get_providers()["providers"])
+    catalog = (config._static_models_catalog_without_live_probes() if producer == "cold"
+               else config.get_available_models(force_refresh=True))
+    assert catalog["active_provider"] == "custom"
+    assert not any(g["provider_id"] == "custom:custom" for g in catalog["groups"])
+    assert any(g["provider_id"] == "custom" for g in catalog["groups"])
+    assert data == before
+
+
+def test_explicit_native_custom_custom_still_owns_its_connection(monkeypatch, outbound_attempts):
+    data = {
+        "model": {"provider": "openai", "default": "gpt-5.4"},
+        "providers": {
+            "custom": {"api_key": "synthetic-default"},
+            "custom:custom": {"api": URL, "api_key": "synthetic-named", "models": [MODEL]},
+        },
+    }
+    bind(monkeypatch, data)
+    assert [e["name"] for e in config._custom_provider_entries(data)] == ["custom:custom"]
+    for catalog in (config._static_models_catalog_without_live_probes(), config.get_available_models(force_refresh=True)):
+        found = next(g for g in catalog["groups"] if g["provider_id"] == "custom:custom")
+        assert [m["id"] for m in found["models"]] == [f"@custom:custom:{MODEL}"]
+    bundle = config.resolve_custom_provider_bundle("custom:custom")
+    assert (bundle["base_url"], bundle["api_key"]) == (URL, "synthetic-named")
+
+
+def test_empty_provider_card_placeholders_are_not_native_authorities(monkeypatch, outbound_attempts):
+    data = {"providers": {
+        "groq": {}, "unknown-placeholder": {}, "custom:empty": {},
+        "custom:disabled": {"enabled": False, "api": URL, "api_key": "synthetic-disabled"},
+        "only_configured": True,
+    }}
+    bind(monkeypatch, data)
+    before = copy.deepcopy(data)
+    cards = {p["id"]: p for p in providers.get_providers()["providers"]}
+    assert "groq" in cards
+    assert cards["groq"]["has_key"] is False
+    assert "unknown-placeholder" in cards
+    assert cards["unknown-placeholder"]["has_key"] is False
+    assert not {"custom:empty", "custom:disabled", "only_configured"}.intersection(cards)
+    assert config._custom_provider_entries(data) == []
+    for pid in ("custom:groq", "custom:unknown-placeholder", "custom:empty", "custom:disabled"):
+        bundle = config.resolve_custom_provider_bundle(pid)
+        assert bundle["status"] == config.CUSTOM_SELECTION_MISSING
+        assert (bundle["base_url"], bundle["api_key"]) == (None, None)
+    assert data == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("only_configured", [False, True])
+def test_underscore_and_hyphen_native_owners_stay_distinct(monkeypatch, outbound_attempts, reverse, only_configured):
+    records = [
+        ("Snake_Case", {"api": "https://underscore.invalid/v1", "api_key": "synthetic-underscore", "name": "Shared Label", "models": [MODEL]}),
+        ("snake-case", {"api": "https://hyphen.invalid/v1", "api_key": "synthetic-hyphen", "name": "Shared Label", "models": [MODEL]}),
+    ]
+    data = {"model": {"provider": "openai"}, "providers": dict(reversed(records) if reverse else records)}
+    data["providers"]["only_configured"] = only_configured
+    bind(monkeypatch, data)
+    before = copy.deepcopy(data)
+    assert config._canonicalise_provider_id("OPENCODE_GO") == "opencode-go"
+    for catalog in (config._static_models_catalog_without_live_probes(), config.get_available_models(force_refresh=True)):
+        groups = {g["provider_id"]: g for g in catalog["groups"]}
+        for pid, host in (("custom:snake_case", "underscore"), ("custom:snake-case", "hyphen")):
+            assert groups[pid]["provider"] == "Shared Label"
+            assert [m["id"] for m in groups[pid]["models"]] == [f"@{pid}:{MODEL}"]
+            bundle = config.resolve_custom_provider_bundle(pid)
+            assert (bundle["base_url"], bundle["api_key"]) == (f"https://{host}.invalid/v1", f"synthetic-{host}")
+            assert config.resolve_model_provider(f"@{pid}:{MODEL}") == (MODEL, pid, f"https://{host}.invalid/v1")
     assert data == before

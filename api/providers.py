@@ -35,11 +35,13 @@ except ImportError:  # pragma: no cover - exercised only where fcntl is unavaila
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _canonicalise_provider_id,
     _coerce_provider_cost_budget,
     _configured_model_ids,
     _custom_provider_entries,
     _custom_provider_slug_from_name,
     _is_native_custom_provider_key,
+    _resolve_configured_provider_id,
     _resolve_custom_record_key,
     _get_label_for_model,
     _models_from_live_provider_ids,
@@ -2694,7 +2696,12 @@ def get_providers() -> dict[str, Any]:
     providers = []
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        known_ids.update(key for key in providers_cfg if not _is_native_custom_provider_key(key))
+        known_ids.update(
+            key for key, value in providers_cfg.items()
+            if not _is_native_custom_provider_key(key)
+            or (isinstance(value, dict) and not value
+                and not str(key).strip().lower().startswith("custom:"))
+        )  # Empty bare settings remain keyless cards, never native authorities.
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
@@ -2998,6 +3005,24 @@ def get_providers() -> dict[str, Any]:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         active_provider = model_cfg.get("provider")
+        # Bare custom stays the default lane, even beside custom:custom.
+        if active_provider and str(active_provider).strip().lower() != "custom":
+            # Existing card IDs own this display namespace (including plugins
+            # and empty bare settings); runtime aliases may use different IDs.
+            card_ids = {card["id"] for card in providers}
+            card_id = str(active_provider).strip().lower()
+            if card_id in card_ids:
+                active_provider = card_id
+            else:
+                # Match native identities BEFORE built-in underscore folding,
+                # using this request's snapshot rather than global cfg.
+                active_provider = _resolve_configured_provider_id(
+                    active_provider, cfg, resolve_alias=False,
+                )
+                card_id = _canonicalise_provider_id(active_provider)
+                if (card_id in card_ids
+                        and (card_id in _PROVIDER_DISPLAY or card_id in _PROVIDER_MODELS)):
+                    active_provider = card_id
 
     # Sort providers: active first, then custom:*, then has_key, then rest.
     def _provider_sort_key(p):

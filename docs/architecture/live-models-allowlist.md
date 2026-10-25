@@ -20,7 +20,12 @@ entries through `api.config._custom_provider_entries()`. This accepts legacy
 rewriting config. Native mapping keys define stable provider IDs; editable
 `name` values are display labels. Native `api` / `url` / `base_url`,
 `default_model`, credential references and model metadata retain their meaning.
-Built-in and plugin provider settings remain separate.
+Built-in and plugin provider settings remain separate. The generic
+`providers.custom` default-endpoint settings do not create a named
+`custom:custom` card or catalog group; an explicitly configured
+`providers['custom:custom']` entry remains a supported named provider. Empty
+bare settings such as `providers.groq: {}` retain their keyless Settings-card
+placeholder and sort behavior, without creating native connection authority.
 
 A missing `custom_providers` key permits native fallback. An explicitly empty
 or malformed legacy store suppresses that fallback; a non-empty legacy store
@@ -39,12 +44,25 @@ restricted to that selected owner.
 
 Connection/runtime selection still reads the complete original owned record,
 not the presentation view, so transport, credential-pool and other advanced
-fields cannot be lost. Metadata-only rows remain visible to readers without
-thereby declaring a runtime connection. An explicit native disable is terminal
+fields cannot be lost. Metadata-only rows remain readable without thereby declaring a runtime
+connection. Cards and metadata lookup retain those rows. For picker catalogs,
+an inactive **bare-key**, metadata-only settings block follows the restored
+models-only exclusion (#1970/#5301); an active bare key or an explicit native
+`custom:<slug>` key may contribute its configured models. Cold and refreshed
+catalogs apply that same admission rule. An explicit native disable is terminal
 before live-model cache, external catalog or persisted-pool fallback; an absent
 config identity may still browse its explicitly persisted pool. Credential
 references are resolved within the request's profile environment, without
 borrowing a process-global key for an empty named profile.
+
+**Change from the published PR8448 head:** its initial read view allowed inactive
+bare-key metadata-only settings to become picker routes. This follow-up
+intentionally narrows that admission to restore the earlier #1970/#5301
+exclusion: metadata readability or a Settings card's capabilities do not
+authorize an inactive bare picker route. Those rows remain readable and visible
+on cards; active bare entries, explicitly prefixed native entries and complete
+connection-owning records retain their existing visibility. This requires no
+config or session migration and does not change raw connection authority.
 
 Named-custom key/capability readers likewise allow an explicitly owned pool
 without a presentation row. Raw disabled/ambiguous identity checks run before
@@ -64,7 +82,9 @@ built-in/plugin aliases and legacy-store visibility keep their existing rules.
 ### Native identity and persisted-input compatibility
 
 New cards, catalog `provider_id` values and unqualified native ownership scans
-use the canonical named-custom identity `custom:<slug>`, including when the
+use the canonical named-custom identity `custom:<slug>`, preserving the custom
+slug producer's underscores (rather than applying built-in underscore-to-hyphen
+alias folding), including when the
 native mapping uses a bare key such as `providers.myprov`. A native key named
 `custom-configured` therefore appears as `custom:custom-configured`, not as a
 reserved sentinel for the default endpoint. Non-active picker options carry
