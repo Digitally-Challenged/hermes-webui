@@ -545,3 +545,14 @@ def test_footer_lookup_is_scoped_to_the_message_segments():
         "the footer lookup must be scoped to the message's own segments; "
         "a whole-turn '.msg-foot' lookup makes the final message skip its labels"
     )
+
+
+def test_touch_devices_keep_footer_time_and_actions_visible():
+    """A routing label moves an interim footer into .msg-foot-with-usage, which hides the
+    timestamp and actions until hover. Touch devices cannot hover, so a (hover: none)
+    rule must restore them (#8287 UX gate: phone interims lost time, speak, branch, copy)."""
+    css = (Path(__file__).resolve().parents[1] / "static" / "style.css").read_text(encoding="utf-8")
+    start = css.index("@media (hover: none), (max-width: 640px) {\n  .msg-foot-with-usage .msg-time")
+    block = css[start:css.index("}\n}", start)]
+    assert ".msg-foot-with-usage .msg-actions" in block
+    assert "opacity: 1" in block
