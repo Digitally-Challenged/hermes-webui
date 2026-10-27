@@ -51,6 +51,8 @@
 
 ### Fixed
 
+- **Every assistant message in a routed turn shows the model that produced it.** Gateway routing metadata was stamped only on the turn's last answer, so interim answers before tool calls had no model label (one real session showed 25 of 32 answers unlabelled). Each assistant message now carries its turn's routing, and the footer lookup is scoped to the message's own foot, so the final answer keeps its "Done in" and usage footer. Thanks @solarmaster961. (#8287)
+
 - **Gateway delegation wake-up after a cut-off fan-out is neutral and conditional.** When a delegation batch that was cut off is delivered, the parent now gets one prompt to check the recovery evidence and re-dispatch only work it can verify is unfinished, instead of a prompt that assumed the owner had exited. Completed batches that merely quote the marker text are no longer treated as recovered. Thanks @carlotestor.
 
 - **Extensions load behind a reverse-proxy subpath mount.** Injected extension script and stylesheet tags are now mount-relative, so `<base href>` resolves them inside `https://host/hermes/` instead of the origin root. Requests the browser's preload scanner makes from a `/session/<id>` deep link (`/session/extensions/...`) now get the real asset instead of the page shell, behind the same auth as `/extensions/`. Thanks @rpodgorny.
