@@ -8550,8 +8550,11 @@ def _context_length_config_api_key_for_provider(
             _select_custom_provider_record, _unique_custom_provider_entry,
         )
 
-        _select_custom_provider_record(provider, _custom_provider_slug_key(provider), cfg)
-        entry = _unique_custom_provider_entry(_custom_provider_entries(cfg), _custom_provider_slug_key(provider))
+        entry, _source, _exact, _status = _select_custom_provider_record(
+            provider, _custom_provider_slug_key(provider), cfg,
+        )
+        if entry is None:
+            entry = _unique_custom_provider_entry(_custom_provider_entries(cfg), _custom_provider_slug_key(provider))
         return _custom_provider_api_key_for_context(entry, provider) if entry is not None else ""
 
     def _resolve_key(raw_api_key, raw_key_env=None) -> str:
@@ -8691,13 +8694,17 @@ def _context_length_lookup_inputs_for_model(
         # Identity outranks URL: shared gateways are not shared authorities.
         # The read view omits bad identities; an explicitly requested native
         # collision must still fail closed rather than become a metadata miss.
+        selected, selected_source = None, ""
         if effective_provider.startswith("custom:"):
-            _select_custom_provider_record(
+            selected, selected_source, _exact, _status = _select_custom_provider_record(
                 effective_provider, _custom_provider_slug_key(effective_provider), cfg,
             )
         entry = _unique_custom_provider_entry(
             custom_providers, _custom_provider_slug_key(effective_provider),
         )
+        if entry is None and selected is not None and selected_source in {"providers", "custom_providers"}:
+            entry = dict(selected)
+            entry["name"] = effective_provider
     elif custom_providers:
         target_base = effective_base_url.rstrip("/")
         model_candidates = set(_model_lookup_candidates(bare_model or model_for_lookup))

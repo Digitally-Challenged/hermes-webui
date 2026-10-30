@@ -1448,10 +1448,13 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         cfg = get_config()
         if _custom_provider_identity_disabled(provider_id, cfg):
             return None
-        _select_custom_provider_record(provider_id, _custom_provider_slug_key(provider_id), cfg)
-        entry = _unique_custom_provider_entry(
-            _custom_provider_entries(cfg), _custom_provider_slug_key(provider_id),
+        entry, _source, _exact, _status = _select_custom_provider_record(
+            provider_id, _custom_provider_slug_key(provider_id), cfg,
         )
+        if entry is None:
+            entry = _unique_custom_provider_entry(
+                _custom_provider_entries(cfg), _custom_provider_slug_key(provider_id),
+            )
         if entry is not None:
             key = _resolve_custom_record_key(entry.get("api_key"), entry.get("key_env"), provider_id)
             if key:

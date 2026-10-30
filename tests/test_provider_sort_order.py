@@ -120,6 +120,21 @@ def _teardown_config():
     config.reload_config()
 
 
+def _isolate_external_catalogs(tmp_path, monkeypatch):
+    """Keep the host's catalog sources out of the static-card assertions.
+
+    The installed Agent's provider plugins add cards (``xai`` beside ``x-ai``)
+    and a ``~/.codex`` models cache replaces the static openai-codex list, so
+    without this these cases pass on agent-free CI and fail on a host with an
+    Agent and a Codex login (#8448 release gate).
+    """
+    # Patch the loader, not the cache: reload_config() invalidates the cache,
+    # and monkeypatch restores the previous cache value afterwards.
+    monkeypatch.setattr(plugin_providers, "_load_profiles_by_name", lambda: {})
+    monkeypatch.setattr(plugin_providers, "_PROFILES_BY_NAME", None)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
+
+
 # ===================================================================
 # get_providers() sort order  (api/providers.py)
 # ===================================================================
@@ -235,6 +250,7 @@ class TestProviderSortOrder:
     @pytest.mark.parametrize("reverse", [False, True])
     def test_active_xai_card_keeps_webui_not_runtime_alias(self, tmp_path, monkeypatch, reverse):
         """The reported config uses the real x-ai catalog, not an openai-only fake."""
+        _isolate_external_catalogs(tmp_path, monkeypatch)
         records = [
             ("x-ai", {"api_key": "synthetic-builtin"}),
             ("a-first", {"base_url": "https://a.invalid/v1", "models": ["a-model"]}),
@@ -269,6 +285,7 @@ class TestProviderSortOrder:
     @pytest.mark.parametrize("pid", sorted(set(config._PROVIDER_DISPLAY) | set(config._PROVIDER_MODELS)))
     def test_active_builtin_metadata_card_identity(self, tmp_path, monkeypatch, reverse, mixed_case, pid):
         """Every current static card competes with native and keyed neighbors."""
+        _isolate_external_catalogs(tmp_path, monkeypatch)
         active = f" {pid.upper()} " if mixed_case else pid
         neighbor = "anthropic" if pid != "anthropic" else "openai"
         records = [

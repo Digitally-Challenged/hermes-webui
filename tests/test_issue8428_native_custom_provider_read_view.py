@@ -1121,3 +1121,40 @@ def test_underscore_and_hyphen_native_owners_stay_distinct(monkeypatch, outbound
             assert (bundle["base_url"], bundle["api_key"]) == (f"https://{host}.invalid/v1", f"synthetic-{host}")
             assert config.resolve_model_provider(f"@{pid}:{MODEL}") == (MODEL, pid, f"https://{host}.invalid/v1")
     assert data == before
+
+
+@pytest.mark.parametrize("legacy", [[], None, "bad"])
+def test_suppressed_read_view_keeps_the_owned_record_credential_and_context(monkeypatch, legacy):
+    """An empty/malformed legacy list hides native rows from the read view, but
+    the keyed ``providers['custom:<slug>']`` record still owns the route: its key
+    clears a paused wakeup after an exhausted pool key, and its context window
+    and key reach the context lookup (#8448 release gate; master resolved both)."""
+    owned = "custom:owned"
+    data = {
+        "model": {"provider": "openai", "default": "other"},
+        "custom_providers": legacy,
+        "providers": {owned: {
+            "base_url": URL, "api_key": "fixture-replacement",
+            "models": {"m": {"context_length": 777777}},
+        }},
+    }
+    bind(monkeypatch, data)
+    if hasattr(routes, "get_config"):
+        monkeypatch.setattr(routes, "get_config", lambda: data)
+    exhausted = {
+        "id": "old", "source": "manual", "last_status": "dead",
+        "secret_fingerprint": providers._credential_secret_fingerprint("fixture-old"),
+    }
+    monkeypatch.setattr(
+        sys.modules["hermes_cli.auth"], "read_credential_pool",
+        lambda pid: [dict(exhausted)] if pid == owned else [],
+    )
+    config.invalidate_credential_pool_cache(owned)
+    assert config._custom_provider_entries(data) == []
+
+    assert providers._get_provider_api_key(owned) == "fixture-replacement"
+    assert providers.provider_has_usable_credential(owned)
+    assert providers.provider_has_process_wakeup_recovery_credential(owned, refresh=True)
+    lookup = routes._context_length_lookup_inputs_for_model("m", owned)
+    assert lookup.config_context_length == 777777
+    assert lookup.api_key == "fixture-replacement"
