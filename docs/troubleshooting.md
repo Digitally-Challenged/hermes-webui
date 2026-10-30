@@ -619,14 +619,14 @@ python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_proces
 | `no claim_instance; older than 2026-10-17` | Agent without `claim_instance`, and this WebUI serves several profiles (a named profile directory exists, or two profile homes were used) | External providers are off for every agent; built-in memory still works. A single-profile install keeps them. |
 | `returned the same shared provider instance that already serves profile home` | The provider plugin hands every agent one shared instance | The first profile that used it keeps it until the WebUI restarts; the others run without it. |
 
-Session boundaries (cache eviction, a new chat, shutdown) commit memory as the session's owner. A commit that cannot run as the owner, or that the Agent refuses, logs `It is NOT counted as committed; the work stays pending` (or `not run`) and is retried at the next boundary. The Agent's refusal is detected even when the root logger is set above WARNING (#8613). An evicted agent whose owner cannot be resolved (its session file was removed outside the WebUI) gets no session end: on an Agent with `MemoryManager.release_soft` its provider is stopped in its own profile (INFO: `without session end (its owner cannot be resolved)`); on older Agents its worker stays until the WebUI restarts (logged once, `until the WebUI restarts`).
+Session boundaries (cache eviction, a new chat, shutdown) commit memory as the session's owner. A commit that cannot run as the owner is logged as `not run` (`The work stays pending`); one the Agent refuses logs `It is NOT counted as committed; the work stays pending`. Both are retried at the next boundary. WebUI notices the Agent's refusal at the Agent's own refusal function (`agent.memory_caller_scope._refuse`), before anything is logged, so the refusal is detected whatever the logging configuration (levels above WARNING, disabled loggers, `logging.disable`) and that configuration is never changed (#8613). An Agent without that function has no caller-scope check and never refuses. An evicted agent whose owner cannot be resolved (its session file was removed outside the WebUI) gets no session end, and its provider is not shut down either: other agents of the same profile may share that provider instance, so its worker stays until the WebUI restarts.
 
 **Diagnostic commands.** Run the Python lines with the Agent's interpreter (the one the WebUI uses).
 
 ```bash
 grep -E '\[webui\] #(8517|8613)' <webui-server-log>
 python3 -c "import hermes_constants as h; print('v0.18.0 home override:', callable(getattr(h, 'set_hermes_home_override', None)))"
-python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(getattr(m, 'claim_instance', None)), 'release_soft:', callable(getattr(m.MemoryManager, 'release_soft', None)))"
+python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(getattr(m, 'claim_instance', None)))"
 ```
 
 **Fix.** Upgrade Hermes Agent and restart the WebUI. For the shared-instance warning, the provider plugin must return a new instance per agent (the documented provider contract); until it does, only the first profile keeps it.

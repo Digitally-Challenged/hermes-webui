@@ -86,7 +86,6 @@ from api.memory_profile_scope import (
     agent_has_memory,
     call_as_session_owner,
     construct_profile_scoped_agent,
-    release_unowned_memory_provider,
     session_profile_home_or_empty,
     turn_memory_reason,
 )
@@ -13686,17 +13685,13 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
         shutdown_memory_provider = getattr(agent, 'shutdown_memory_provider', None)
         if callable(shutdown_memory_provider):
             session_messages = vars(agent).get('_session_messages', [])
-            if not call_as_session_owner(
+            call_as_session_owner(
                 agent,
                 lambda: shutdown_memory_provider(session_messages),
                 session_id=session_id,
                 owner_home=_owner_home,
                 what="memory provider shutdown",
-            ):
-                # #8613: an owner that cannot be resolved also skipped the provider
-                # teardown inside shutdown_memory_provider; release the provider in
-                # its own bound profile, without session end (no-op otherwise).
-                release_unowned_memory_provider(agent, session_id=session_id, owner_home=_owner_home)
+            )
     except Exception:
         logger.debug("Failed to shut down evicted agent memory provider for session %s", session_id, exc_info=True)
 
