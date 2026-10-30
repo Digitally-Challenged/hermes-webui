@@ -799,30 +799,75 @@ def test_a_writable_stampless_checkout_runs_the_stage_wherever_it_is_mounted(tmp
     assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
 
 
-@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root traverses 0111 directories")
-def test_homes_the_selection_cannot_see_still_get_the_stage(tmp_path, staged_agent):
-    """#8594 gate shapes a list of reachable homes missed: an execute-only profiles dir,
-    a symlinked profiles dir, and a literal $VAR the restarted Agent expands."""
-    src, stage = staged_agent
-    (src / ".git").mkdir()
-    (src / "install-stamp.json").unlink()
+def _execute_only_profiles(tmp_path, src):
+    """<base>/profiles is mode 0111: WebUI still enters the active profile, a listing cannot."""
     base = tmp_path / "b" / ".hermes"
     (base / "profiles" / "coder").mkdir(parents=True)
     (base / "active_profile").write_text("coder", encoding="utf-8")
     mount = base / "profiles" / "coder" / "hermes-agent"
     src.rename(mount)
     (base / "profiles").chmod(0o111)
+    return mount, {"HERMES_HOME": str(base)}, lambda: (base / "profiles").chmod(0o755)
+
+
+def _symlinked_profiles(tmp_path, src):
+    """<B>/profiles -> <C>/profiles: WebUI publishes the canonical <C>/profiles/coder, and a
+    later restart unwraps that to the base <C>, whose hermes-agent is the mount."""
+    b, c = tmp_path / "b" / ".hermes", tmp_path / "c" / ".hermes"
+    (c / "profiles" / "coder").mkdir(parents=True)
+    b.mkdir(parents=True)
+    (b / "profiles").symlink_to(c / "profiles")
+    (b / "active_profile").write_text("coder", encoding="utf-8")
+    mount = c / "hermes-agent"
+    src.rename(mount)
+    return mount, {"HERMES_HOME": str(b)}, lambda: None
+
+
+def _literal_variable_home(tmp_path, src):
+    """HERMES_HOME holds a literal $DATA: WebUI publishes it unexpanded, the restarted Agent
+    expands it, so its profile home is the expanded one, under which the mount sits."""
+    literal, expanded = tmp_path / "t" / "$DATA", tmp_path / "t" / "actual"
+    for home in (literal, expanded):
+        (home / "profiles" / "coder").mkdir(parents=True)
+        (home / "active_profile").write_text("coder", encoding="utf-8")
+    mount = expanded / "profiles" / "coder" / "hermes-agent"
+    src.rename(mount)
+    return mount, {"HERMES_HOME": str(literal), "DATA": "actual"}, lambda: None
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root traverses 0111 directories")
+@pytest.mark.parametrize("shape", [_execute_only_profiles, _symlinked_profiles, _literal_variable_home],
+                         ids=["execute-only-profiles", "symlinked-profiles", "literal-variable-home"])
+def test_homes_a_list_would_miss_still_get_the_stage(tmp_path, staged_agent, shape):
+    """#8594 gate shapes where a list of reachable homes kept the mount and the Agent later
+    adopted it after a profile switch plus an os.execv restart."""
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    (src / "install-stamp.json").unlink()
+    mount, env, cleanup = shape(tmp_path, src)
     try:
-        assert _run_selection(tmp_path, str(mount), str(stage), None, {"HERMES_HOME": str(base)}) == str(stage)
+        assert _run_selection(tmp_path, str(mount), str(stage), None, env) == str(stage)
     finally:
-        (base / "profiles").chmod(0o755)
-    other = tmp_path / "c" / ".hermes"
-    other.mkdir(parents=True)
-    (other / "profiles").symlink_to(base / "profiles")
-    assert _run_selection(tmp_path, str(mount), str(stage), None, {"HERMES_HOME": str(other)}) == str(stage)
-    literal = tmp_path / "literal" / "$DATA"
-    assert _run_selection(tmp_path, str(mount), str(stage), None,
-                          {"HERMES_HOME": str(literal), "DATA": "actual"}) == str(stage)
+        cleanup()
+
+
+def test_a_profile_env_cannot_move_the_install_root(tmp_path, monkeypatch):
+    """#8594 gate: the stamp the Agent reads must stay where docker_init read it, so a
+    profile .env cannot set HERMES_INSTALL_ROOT before an in-app update restart."""
+    import api.profiles as profiles
+    assert "HERMES_INSTALL_ROOT" in profiles._PROTECTED_ENV_KEYS
+    monkeypatch.delenv("HERMES_INSTALL_ROOT", raising=False)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set(), raising=False)
+    home = tmp_path / "profiles" / "coder"
+    home.mkdir(parents=True)
+    (home / ".env").write_text(f"HERMES_INSTALL_ROOT={tmp_path / 'elsewhere'}\nSOME_PROFILE_KEY=1\n", encoding="utf-8")
+    profiles._reload_dotenv(home)
+    try:
+        assert "HERMES_INSTALL_ROOT" not in os.environ
+        assert os.environ.get("SOME_PROFILE_KEY") == "1"
+    finally:
+        profiles._reload_dotenv(tmp_path / "nowhere")
+        os.environ.pop("SOME_PROFILE_KEY", None)
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes 0555 directories")
