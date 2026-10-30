@@ -582,3 +582,31 @@ def test_stable_release_cotagged_with_a_prerelease_is_up_to_date(tmp_path, extra
     assert info['behind'] == 0
     apply_ref = updates._select_apply_compare_ref(repo, 'stable', 'agent')
     assert apply_ref in ('v0.22.5', None)
+
+
+def test_stable_install_whose_only_reachable_tag_is_a_canary(tmp_path):
+    """No release tag behind HEAD, only a canary (a shallow clone of a canary
+    build): the update count counts releases only, and the installed version and
+    compare ref still name the canary (#8147 release gate)."""
+    repo = tmp_path / 'canary-only'
+    repo.mkdir()
+    _git(repo, 'init', '-q', '-b', 'main')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'canary build')
+    _git(repo, 'tag', '-a', '-m', 'canary', 'v0.22.5+canary.1')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'release')
+    _git(repo, 'tag', 'v0.22.5')
+    _git(repo, 'tag', '-a', '-m', 'canary', 'v0.22.5+canary.2')
+    _git(repo, 'remote', 'add', 'origin', str(_local_origin(repo, tmp_path)))
+    _git(repo, 'fetch', '-q', 'origin')
+    _git(repo, 'checkout', '-q', 'v0.22.5+canary.1')
+
+    assert updates._current_release_tag(repo, 'stable') is None
+    assert updates._count_channel_tags_ahead(repo, 'stable') == 1
+    info = updates._check_repo_release(repo, 'agent', 'stable')
+    assert info is not None
+    assert info['behind'] == 1
+    assert info['latest_version'] == 'v0.22.5'
+    assert info['current_version'] == 'v0.22.5+canary.1'
+    assert info['current_sha'] == 'v0.22.5+canary.1'

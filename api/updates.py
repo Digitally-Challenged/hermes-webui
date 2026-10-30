@@ -1065,7 +1065,11 @@ def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
     )
     if not (ok and out):
         return 0
-    return sum(1 for line in out.splitlines() if line.strip())
+    tags = [line.strip() for line in out.splitlines() if line.strip()]
+    if _normalize_channel(channel) == 'stable':
+        # Count releases, not the prerelease tags _release_tags drops.
+        tags = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
+    return len(tags)
 
 
 def _release_tag_sort_key(tag):
@@ -1424,6 +1428,20 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             )
             exact_tag = (exact_tag or '').strip()
             current_sha_ref = exact_tag if ok and exact_tag else None
+        elif _normalize_channel(channel) == 'stable':
+            # The stable describe skips prereleases, so an install whose only
+            # reachable ``v*`` tag is a canary (e.g. a shallow clone of a canary
+            # build) has no release behind HEAD. That tag is still the installed
+            # version and a real ref for the compare link: show it, but never use
+            # it for release selection.
+            raw_tag, ok = _run_git(
+                ['describe', '--tags', '--abbrev=0', '--match', _channel_tag_glob(channel)],
+                path,
+            )
+            raw_tag = (raw_tag or '').strip()
+            if ok and raw_tag:
+                current_version_display = raw_tag
+                current_sha_ref = raw_tag
 
     # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
     # keeps committing to master between tagged releases), the release check
