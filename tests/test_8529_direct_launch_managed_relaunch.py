@@ -640,8 +640,10 @@ def test_only_a_self_updating_stamp_selects_the_stage(tmp_path, staged_agent):
     stamp.mkdir()                                                             # a directory reads as {}
     assert _run_selection(tmp_path, str(src), str(stage), None) == "<unset>"
     stamp.rmdir()
-    # Stampless and not at any Hermes home's hermes-agent: never adopted, never relaunched (#8593).
-    assert _run_selection(tmp_path, str(src), str(stage), None) == "<unset>"
+    # Stampless and writable: the Agent may adopt it after a later HERMES_HOME change
+    # (profile switch, then an os.execv restart without docker_init), wherever it is
+    # mounted, so the stage, as on exp-v0.52.571 (#8594 gate).
+    assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
 
 
 def test_an_unreadable_stamp_without_python3_prefers_the_stage(tmp_path, staged_agent):
@@ -770,68 +772,57 @@ def test_an_unreadable_stamp_is_quiet_and_explained(tmp_path, staged_agent):
     assert "could not tell whether the Agent" in proc.stdout and "running the staged copy" in proc.stdout, proc.stdout
 
 
-# --- #8593: a stampless checkout is adopted (and relaunched) only at a Hermes home ---
+# --- #8593 / #8594 gate: a stampless checkout's adoption depends on HERMES_HOME at relaunch time ---
+# WebUI rewrites HERMES_HOME after docker_init (init_profile_state(), profile switches) and
+# its in-app update restarts with os.execv without docker_init, so the selection decides only
+# on what no later HERMES_HOME can change: a writable stampless checkout always gets the stage.
 
 
-def test_a_stampless_clone_runs_the_stage_only_where_the_agent_adopts_it(tmp_path, staged_agent):
-    src, stage = staged_agent
-    (src / ".git").mkdir()
-    (src / "install-stamp.json").unlink()
-    home = tmp_path / "hh"
-    blessed = home / "hermes-agent"
-    blessed.parent.mkdir(parents=True)
-    src.rename(blessed)
-    assert _run_selection(tmp_path, str(blessed), str(stage), None, {"HERMES_HOME": str(home)}) == str(stage)
-    assert _run_selection(tmp_path, str(blessed), str(stage), None, {"HERMES_HOME": f" {home} "}) == str(stage)
-    link = tmp_path / "linked-home"                       # the Agent compares resolved paths
-    link.symlink_to(home)
-    assert _run_selection(tmp_path, str(blessed), str(stage), None, {"HERMES_HOME": str(link)}) == str(stage)
-    # The Agent's platform default when HERMES_HOME is unset or blank.
-    user = tmp_path / "user"
-    (user / ".hermes-x").mkdir(parents=True)
-    default = user / ".hermes-x" / "hermes-agent"
-    blessed.rename(default)
-    env = {"HERMES_HOME": None, "HOME": str(user), "HERMES_DATA_DIR_SUFFIX": "-x"}
-    assert _run_selection(tmp_path, str(default), str(stage), None, env) == str(stage)
-    assert _run_selection(tmp_path, str(default), str(stage), None, {**env, "HERMES_HOME": "  "}) == str(stage)
-    # HERMES_INSTALL_ROOT moves the stamp the Agent reads but not the one adoption writes:
-    # undecidable, so the stage.
-    assert _run_selection(tmp_path, str(default), str(stage), None,
-                          {**env, "HERMES_INSTALL_ROOT": str(tmp_path)}) == str(stage)
-    # A dangling stamp symlink is a missing stamp to the Agent (adoption replaces it).
-    (default / "install-stamp.json").symlink_to(tmp_path / "nowhere.json")
-    assert _run_selection(tmp_path, str(default), str(stage), None, env) == str(stage)
-
-
-def test_every_home_webui_may_switch_to_counts(tmp_path, staged_agent):
-    """#8594 gate: init_profile_state() and profile switches rewrite HERMES_HOME, and an
-    in-app update self-restarts with os.execv without docker_init. The restarted Agent then
-    adopts a stampless checkout at the home WebUI switched to."""
+def test_a_writable_stampless_checkout_runs_the_stage_wherever_it_is_mounted(tmp_path, staged_agent):
     src, stage = staged_agent
     (src / ".git").mkdir()
     (src / "install-stamp.json").unlink()
     base = tmp_path / "base" / ".hermes"
     (base / "profiles" / "coder").mkdir(parents=True)
-    (base / "profiles" / "writer").mkdir(parents=True)
-    at_base = base / "hermes-agent"
-    src.rename(at_base)
-    # Launched as a named profile: WebUI unwraps to the base home.
-    profile = {"HERMES_HOME": str(base / "profiles" / "coder")}
-    assert _run_selection(tmp_path, str(at_base), str(stage), None, profile) == str(stage)
-    assert _run_selection(tmp_path, str(at_base), str(stage), None,
-                          {"HERMES_BASE_HOME": str(base)}) == str(stage)
-    assert _run_selection(tmp_path, str(at_base), str(stage), None,
-                          {"HERMES_BASE_HOME": str(base / "profiles" / "writer")}) == str(stage)
-    # Launched at the base home: a profile WebUI may switch to.
-    at_profile = base / "profiles" / "writer" / "hermes-agent"
-    at_base.rename(at_profile)
-    assert _run_selection(tmp_path, str(at_profile), str(stage), None, {"HERMES_HOME": str(base)}) == str(stage)
-    # A checkout anywhere else is never adopted.
-    elsewhere = tmp_path / "opt" / "hermes"
-    elsewhere.parent.mkdir(parents=True)
-    at_profile.rename(elsewhere)
-    assert _run_selection(tmp_path, str(elsewhere), str(stage), None, {"HERMES_HOME": str(base)}) == "<unset>"
-    assert _run_selection(tmp_path, str(elsewhere), str(stage), None, profile) == "<unset>"
+    places = [base / "hermes-agent", base / "profiles" / "coder" / "hermes-agent", tmp_path / "opt" / "hermes"]
+    for env in ({"HERMES_HOME": str(base)}, {"HERMES_HOME": str(base / "profiles" / "coder")},
+                {"HERMES_HOME": None, "HOME": str(tmp_path / "user")}, {"HERMES_BASE_HOME": str(base)}):
+        for place in places:
+            place.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(place)
+            assert _run_selection(tmp_path, str(place), str(stage), None, env) == str(stage), (env, place)
+            src = place
+    # HERMES_INSTALL_ROOT with no stamp there: undecidable, so the stage too.
+    assert _run_selection(tmp_path, str(src), str(stage), None, {"HERMES_INSTALL_ROOT": str(tmp_path)}) == str(stage)
+    # A dangling stamp symlink is a missing stamp to the Agent (adoption replaces it).
+    (src / "install-stamp.json").symlink_to(tmp_path / "nowhere.json")
+    assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root traverses 0111 directories")
+def test_homes_the_selection_cannot_see_still_get_the_stage(tmp_path, staged_agent):
+    """#8594 gate shapes a list of reachable homes missed: an execute-only profiles dir,
+    a symlinked profiles dir, and a literal $VAR the restarted Agent expands."""
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    (src / "install-stamp.json").unlink()
+    base = tmp_path / "b" / ".hermes"
+    (base / "profiles" / "coder").mkdir(parents=True)
+    (base / "active_profile").write_text("coder", encoding="utf-8")
+    mount = base / "profiles" / "coder" / "hermes-agent"
+    src.rename(mount)
+    (base / "profiles").chmod(0o111)
+    try:
+        assert _run_selection(tmp_path, str(mount), str(stage), None, {"HERMES_HOME": str(base)}) == str(stage)
+    finally:
+        (base / "profiles").chmod(0o755)
+    other = tmp_path / "c" / ".hermes"
+    other.mkdir(parents=True)
+    (other / "profiles").symlink_to(base / "profiles")
+    assert _run_selection(tmp_path, str(mount), str(stage), None, {"HERMES_HOME": str(other)}) == str(stage)
+    literal = tmp_path / "literal" / "$DATA"
+    assert _run_selection(tmp_path, str(mount), str(stage), None,
+                          {"HERMES_HOME": str(literal), "DATA": "actual"}) == str(stage)
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes 0555 directories")

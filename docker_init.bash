@@ -970,17 +970,20 @@ select_staged_agent_for_git_checkout() {
   [ -f "$_src/pyproject.toml" ] || return 0
   # Then ask whether this Agent's bootstrap would relaunch, mirroring Agent v0.22.5
   # (identical in canary 20261028 and main): read_install_stamp() reads the whole stamp
-  # as utf-8-sig JSON where pm/paths.py install_root() puts it, an OSError, ValueError
-  # or non-object reads as {}, and only an exact "self" relaunches. With no stamp file,
-  # step_adopt_blessed_checkout() adopts the checkout as "self" only when it resolves to
-  # <home>/hermes-agent or /usr/local/lib/hermes-agent and is writable. WebUI can move
-  # HERMES_HOME after this runs (init_profile_state(), profile switches) and then
-  # self-restart with os.execv without docker_init (#8594 gate), so every home it may
-  # move to counts: the base home it unwraps HERMES_BASE_HOME / HERMES_HOME to, and each
-  # <base>/profiles/<name>. Prints "mount" only when the Agent will provably not
-  # relaunch (#8593); anything it cannot settle prefers the stage, because keeping a
-  # mount that does relaunch crash-loops (#8529) while an unneeded stage costs only the
-  # in-app Agent update.
+  # as utf-8-sig JSON where pm/paths.py install_root() puts it (HERMES_INSTALL_ROOT,
+  # which WebUI never changes, else beside the checkout), an OSError, ValueError or
+  # non-object reads as {}, and only an exact "self" relaunches. With no stamp file,
+  # step_adopt_blessed_checkout() adopts the checkout as "self" when it is writable and
+  # resolves to <HERMES_HOME>/hermes-agent or /usr/local/lib/hermes-agent. That one
+  # input is not fixed at boot: WebUI rewrites HERMES_HOME (init_profile_state(),
+  # profile switches) and its in-app update restarts with os.execv without docker_init,
+  # and no list of the homes it may reach held up in review (#8594 gate). So decide only
+  # on what no later HERMES_HOME can change: the stamp's content, and that a read-only
+  # stampless checkout is never adopted. A writable stampless checkout gets the stage
+  # wherever it is mounted, as on exp-v0.52.571. Prints "mount" only when the Agent will
+  # provably not relaunch (#8593); anything it cannot settle prefers the stage, because
+  # keeping a mount that does relaunch crash-loops (#8529) while an unneeded stage
+  # costs only the in-app Agent update.
   _verdict=unknown
   if command -v python3 >/dev/null 2>&1; then
     _timeout=""
@@ -991,27 +994,6 @@ root = Path(sys.argv[1])
 install_root = os.environ.get("HERMES_INSTALL_ROOT")
 stamp = (Path(install_root) if install_root else root) / "install-stamp.json"
 
-
-def homes():
-    # The Agent: HERMES_HOME, else ~/.hermes<HERMES_DATA_DIR_SUFFIX>.
-    agent = os.environ.get("HERMES_HOME", "").strip()
-    yield (Path(os.path.expanduser(os.path.expandvars(agent))) if agent
-           else Path.home() / (".hermes" + os.environ.get("HERMES_DATA_DIR_SUFFIX", "")))
-    # WebUI api/profiles.py _resolve_base_hermes_home() + _unwrap_profile_home_to_base().
-    for name in ("HERMES_BASE_HOME", "HERMES_HOME"):
-        value = os.environ.get(name, "").strip()
-        if value:
-            base = Path(value).expanduser()
-            break
-    else:
-        base = Path.home() / ".hermes"
-    if base.parent.name == "profiles":
-        base = base.parent.parent
-    yield base
-    try:
-        yield from (p for p in (base / "profiles").iterdir() if p.is_dir())
-    except OSError:
-        pass
 
 
 def verdict():
@@ -1033,14 +1015,8 @@ def verdict():
         return "stage" if data.get("updateMechanism") == "self" else "mount"
     if install_root:
         return "unknown"
-    resolved = root.resolve()
-    for home in [*homes(), Path("/usr/local/lib")]:
-        try:
-            if resolved == (home / "hermes-agent").resolve():
-                return "stage" if os.access(root, os.W_OK) else "mount"
-        except (OSError, RuntimeError):
-            continue
-    return "mount"
+    # Adoption writes the stamp into the checkout: a read-only one is never adopted.
+    return "stage" if os.access(root, os.W_OK) else "mount"
 
 
 try:
