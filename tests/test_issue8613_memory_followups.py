@@ -61,6 +61,16 @@ def _agent_refuses(hook: str = "on_session_end") -> None:
     _refuse(f"hook {hook}", "test refusal", None, None, False)
 
 
+def _real_memory_manager():
+    """The installed Agent's ``agent.memory_manager`` and ``MemoryProvider``; skips
+    without an Agent (the ``hc`` fixture may have put a claim-seam twin in its place)."""
+    mm_mod = pytest.importorskip("agent.memory_manager")
+    if not isinstance(getattr(mm_mod, "MemoryManager", None), type):
+        pytest.skip("no installed Hermes Agent MemoryManager")
+    provider_mod = pytest.importorskip("agent.memory_provider")
+    return mm_mod, provider_mod.MemoryProvider
+
+
 def _logger_state(lg: logging.Logger) -> tuple:
     return (lg.level, lg.disabled, lg.propagate, list(lg.filters), list(lg.handlers))
 
@@ -206,8 +216,7 @@ def test_refusal_line_still_reaches_the_deployer_at_default_levels(hc, homes, lo
 def test_real_agent_refusal_under_a_raised_root_level_stays_pending(hc, homes, lifecycle, log_config, monkeypatch):
     """The installed Agent's own MemoryManager refusing ``on_session_end`` (bound to
     beta, called as alpha) on an Agent whose binding WebUI cannot read."""
-    mm_mod = pytest.importorskip("agent.memory_manager")
-    from agent.memory_provider import MemoryProvider  # noqa: PLC0415
+    mm_mod, MemoryProvider = _real_memory_manager()
 
     events: list = []
 
@@ -435,8 +444,7 @@ def test_real_memory_manager_unowned_eviction_leaves_no_mem_sync_thread(hc, home
     """The installed Agent: a provider with a live ``mem-sync`` writer, evicted with an
     unresolvable owner. The writer stops, queued writes land in the provider's own
     profile, no session end runs, and a later teardown does not shut it down twice."""
-    mm_mod = pytest.importorskip("agent.memory_manager")
-    from agent.memory_provider import MemoryProvider  # noqa: PLC0415
+    mm_mod, MemoryProvider = _real_memory_manager()
 
     if not (callable(getattr(mm_mod.MemoryManager, "release_soft", None))
             and callable(getattr(mm_mod.MemoryManager, "claim_teardown", None))):
