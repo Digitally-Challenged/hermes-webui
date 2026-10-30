@@ -396,7 +396,6 @@ function _syncToolCallGroupSummary() {}
 function _restoreWorklogDetailDisclosureState() {}
 function _scrollAfterMessageRender() {}
 function _maybeRecoverVirtualizedBlankViewport() { return false; }
-function _captureMessageRecoveryOwnership() { return { programmatic: false, jumpOwner: false }; }
 function _updateMessageVirtualMeasurements() {}
 function _resetMessageVirtualMeasurementBurst() {}
 function postProcessRenderedMessages() {}
