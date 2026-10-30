@@ -520,7 +520,9 @@ def test_troubleshooting_documents_the_memory_scope_warnings():
         assert needle in entry, needle
     # Every log fragment the entry quotes is one the code actually logs.
     constants = _string_constants(REPO_ROOT / "api" / "memory_profile_scope.py")
-    quoted = re.findall(r"`([^`]*?(?:refused|older than|shared provider instance|without session end)[^`]*)`", entry)
-    assert len(quoted) >= 4, quoted
+    prose = re.sub(r"```.*?```", "", entry, flags=re.S)
+    quoted = [span for span in re.findall(r"`([^`]+)`", prose)
+              if re.search(r"refused|older than|shared provider instance|session end|pending|restarts", span)]
+    assert len(quoted) >= 6, quoted
     for fragment in quoted:
         assert any(fragment in c for c in constants), f"documented log text not in the code: {fragment!r}"
