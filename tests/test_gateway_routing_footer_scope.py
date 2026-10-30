@@ -411,6 +411,14 @@ function _insertCompactionCardNodes() {
 function _insertPreservedCompressionTaskFallback() { return false; }
 function _pinCompactionCardAtTop() { return false; }
 function _thinkingCardHtml() { return ''; }
+// Master calls this at the end of renderMessages (#7591). The harness extracts
+// that function without the helper, so a missing binding aborts before the
+// footer assertions. Blank-viewport recovery is stubbed off above; this return
+// only feeds that stub. Do not default isTurnFinal to true to paper over it —
+// that paints turn warnings on every segment.
+function _captureMessageRecoveryOwnership() {
+  return { programmatic: false, jumpOwner: false };
+}
 
 // Footer label helpers: distinctive strings so the assertions can tell which
 // fragment landed in which foot. The gateway-routing footer helpers from
