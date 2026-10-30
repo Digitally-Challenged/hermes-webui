@@ -33,9 +33,9 @@ def _fake_git_two_series(args, cwd, timeout=10):
             'v2026.9.24\n'
             'v2026.9.21\n'
         ), True
-    if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+    if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
         return 'v0.21.6', True
-    if args == ['describe', '--tags', '--always', '--match', 'v*']:
+    if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
         return 'v0.21.6', True  # HEAD exactly on the release tag
     if args == ['merge-base', '--is-ancestor', 'v0.21.6', 'HEAD']:
         return '', True

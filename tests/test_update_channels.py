@@ -545,3 +545,40 @@ def test_stable_cross_major_older_major_annotated_later_ranks_higher_major_first
     assert info['current_version'] == 'v0.52.113'
     assert info['latest_version'] == 'v1.0.0'
     assert updates._select_apply_compare_ref(repo, 'stable', 'webui') == 'v1.0.0'
+
+
+@pytest.mark.parametrize('extra_tag', ['v0.22.5+canary.1', 'v0.22.5-rc.1'])
+def test_stable_release_cotagged_with_a_prerelease_is_up_to_date(tmp_path, extra_tag):
+    """A canary or ``-`` prerelease tag on the SAME commit as the latest stable
+    release must not become the installed tag: ``git describe`` prefers the
+    annotated prerelease, which the stable list drops, and the resulting false
+    gap sent check and apply to the branch head (#8147 release gate)."""
+    repo = tmp_path / 'cotag'
+    repo.mkdir()
+    _git(repo, 'init', '-q', '-b', 'main')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'r4')
+    _git(repo, 'tag', 'v0.22.4')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'r5')
+    _git(repo, 'tag', 'v0.22.5')
+    _git(repo, 'tag', '-a', '-m', 'prerelease build', extra_tag)
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'untagged development work')
+    _git(repo, 'remote', 'add', 'origin', str(_local_origin(repo, tmp_path)))
+    _git(repo, 'fetch', '-q', 'origin')
+    _git(repo, 'checkout', '-q', 'v0.22.5')
+
+    raw = subprocess.run(
+        ['git', 'describe', '--tags', '--abbrev=0', '--match', 'v*'],
+        cwd=str(repo), check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert raw == extra_tag, f'fixture must reproduce the prerelease preference, got {raw}'
+
+    assert updates._release_tags(repo, 'stable') == ['v0.22.5', 'v0.22.4']
+    assert updates._current_release_tag(repo, 'stable') == 'v0.22.5'
+    assert updates._head_is_past_latest_tag(repo, 'v0.22.5', 'stable') is False
+    info = updates._check_repo_release(repo, 'agent', 'stable')
+    assert info is not None
+    assert info['behind'] == 0
+    apply_ref = updates._select_apply_compare_ref(repo, 'stable', 'agent')
+    assert apply_ref in ('v0.22.5', None)

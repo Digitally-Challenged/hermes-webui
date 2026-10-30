@@ -848,8 +848,8 @@ _CHANNEL_TAG_GLOBS = {
 _STABLE_RELEASE_TAG_RE = re.compile(r'^v\d+(?:\.\d+)+$')
 # The major-version SERIES a stable tag belongs to (``v0.52.114`` -> ``v0``,
 # legacy ``v2026.9.24`` -> ``v2026``). The Agent repo renamed its stable series
-# from ``v2026.9.x`` to ``v0.21.x`` in Oct 2026, so ordering has to compare
-# SERIES by recency and VERSIONS inside a series by number.
+# from ``v2026.9.x`` to ``v0.21.x`` in Oct 2026, so ordering has to rank the
+# current series above the legacy one and VERSIONS inside a series by number.
 _STABLE_SERIES_RE = re.compile(r'^(v\d+)\.')
 
 
@@ -869,29 +869,27 @@ def _release_version_key(tag: str):
 
 
 def _order_stable_tags(tags):
-    """Group stable release tags by series (newest series first) and order each
-    group by DESCENDING NUMERIC VERSION.
+    """Group stable release tags by series and order each group by DESCENDING
+    NUMERIC VERSION.
 
-    Creation date stays the OUTER key — that is the whole point of the original
-    fix: the rename from ``v2026.9.x`` to ``v0.21.x`` means name order ranks the
-    LEGACY series first, resolving "latest" to an ancestor of HEAD and firing
-    the branch-comparison fallback. Since the tags arrive already sorted by
-    creatordate, the first appearance of each series in the list is its newest
-    tag, which orders the groups.
+    Series order is fixed, not date-based: the legacy CalVer series ``v2026``
+    ranks below every other series, and the others rank by major number,
+    highest first. That is what fixes the rename from ``v2026.9.x`` to
+    ``v0.21.x``: name order ranked the LEGACY series first, resolving "latest"
+    to an ancestor of HEAD and firing the branch-comparison fallback.
 
-    The numeric version is the INNER key, and it is what removes the two
-    remaining date hazards:
+    The order is the same whatever order ``tags`` arrive in, so it carries none
+    of the creation-date hazards:
 
     * ``git`` breaks creatordate TIES by refname ascending, so two releases
-      tagged in the same second list the OLDER one first and the update check
-      reports ``behind=0`` on an install that is one release behind;
+      tagged in the same second would list the OLDER one first and the update
+      check would report ``behind=0`` on an install that is one release behind;
     * creatordate is the tagger date for an ANNOTATED tag but the COMMIT date
-      for a lightweight one, so a mixed pair can rank an older release ahead of
-      a newer one even without a tie.
+      for a lightweight one, so a mixed pair could rank an older release ahead
+      of a newer one even without a tie.
 
-    Neither hazard can reorder anything inside a series once the inner key is
-    the version number, and neither can move a series past a newer one because
-    the outer key only compares series.
+    ``v2026`` is named explicitly because it is the only legacy series that
+    exists; a future series rename would need a new rule here.
     """
     por_grupo = {}
     for tag in tags:
@@ -916,6 +914,24 @@ def _normalize_channel(channel) -> str:
 def _channel_tag_glob(channel) -> str:
     """Return the ``git tag --list`` glob for the given channel."""
     return _CHANNEL_TAG_GLOBS[_normalize_channel(channel)]
+
+
+# ``git describe`` must skip the same non-release tags _release_tags drops from
+# the stable list. A build-metadata canary (``v0.22.5+canary.1``) or a ``-``
+# prerelease on the SAME commit as a stable release would otherwise describe as
+# the installed tag, fall outside the filtered list, and send both the check and
+# the apply to the branch head (untagged development code) on an up-to-date
+# install.
+_STABLE_DESCRIBE_EXCLUDES = ('--exclude', 'v*+*', '--exclude', 'v*-*')
+
+
+def _channel_describe_filter(channel) -> list:
+    """``--match``/``--exclude`` arguments that limit ``git describe`` to the
+    channel's release tags (the tags ``_release_tags`` can list)."""
+    args = ['--match', _channel_tag_glob(channel)]
+    if _normalize_channel(channel) == 'stable':
+        args.extend(_STABLE_DESCRIBE_EXCLUDES)
+    return args
 
 
 def _read_update_channel() -> str:
@@ -974,8 +990,8 @@ def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):
     they are a single series that has never been renamed, so numeric name order
     IS release order.
 
-    **Stable** tags are ordered by SERIES recency and then by NUMERIC VERSION
-    inside each series (see ``_order_stable_tags``), because:
+    **Stable** tags are ordered by SERIES (current above legacy) and then by
+    NUMERIC VERSION inside each series (see ``_order_stable_tags``), because:
 
     * the Agent repo renamed its stable series from ``v2026.9.x`` to
       ``v0.21.x`` (Oct 2026) and name order ranks ``v2026.9.24`` above
@@ -1017,7 +1033,7 @@ def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
     math resolve to the experimental tag and fall through to the branch firehose.
     """
     out, ok = _run_git(
-        ['describe', '--tags', '--abbrev=0', '--match', _channel_tag_glob(channel)],
+        ['describe', '--tags', '--abbrev=0', *_channel_describe_filter(channel)],
         path,
     )
     return out if ok and out else None
@@ -1242,7 +1258,7 @@ def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
     if not current_tag:
         return False
     full_desc, ok = _run_git(
-        ['describe', '--tags', '--always', '--match', _channel_tag_glob(channel)],
+        ['describe', '--tags', '--always', *_channel_describe_filter(channel)],
         path,
     )
     return bool(ok and full_desc and full_desc != current_tag)
