@@ -522,19 +522,19 @@ def session_owner_profile_home(session_id: str) -> str:
         return ""
 
 
-class _HookRefusalCapture(logging.Handler):
+class _HookRefusalCapture:
     """Notices the Agent refusing ``hook`` on THIS thread. The Agent's lifecycle
     hooks return nothing when its caller-scope check refuses them; the only
-    signal is its WARNING (agent/memory_caller_scope._refuse)."""
+    signal is its WARNING (agent/memory_caller_scope._refuse), which reaches the
+    capture through ``_RefusalCaptureWindow`` whatever the logging levels (#8613)."""
 
     def __init__(self, hook: str):
-        super().__init__(logging.WARNING)
         self._needle = f"hook {hook}"
         self._thread = threading.get_ident()
         self.refused = False
 
-    def emit(self, record: logging.LogRecord) -> None:
-        if record.thread != self._thread:
+    def observe(self, record: logging.LogRecord) -> None:
+        if record.thread != self._thread or record.levelno < logging.WARNING:
             return
         try:
             message = record.getMessage()
@@ -542,6 +542,93 @@ class _HookRefusalCapture(logging.Handler):
             return
         if "refused" in message and self._needle in message:
             self.refused = True
+
+
+class _RefusalCaptureWindow(logging.Filter):
+    """Open while at least one ``_HookRefusalCapture`` is (#8613).
+
+    The refusal record is only created when ``agent.memory_caller_scope`` admits
+    WARNING; a deployer who raised the root (or ``agent``) level, or a ``dictConfig``
+    that disabled existing loggers, made a refused commit count as done. While the
+    window is open, THAT logger alone is enabled at WARNING and this filter, first
+    on it, hands every record to the open captures, then passes on only what the
+    logger's own configuration would have emitted: the deployer's handlers see
+    exactly what they saw before. No other logger and no handler is touched, and
+    the process-wide ``logging.disable`` is left alone. The first capture saves the
+    logger's level and ``disabled`` flag; the last restores each one it changed,
+    unless something else set it meanwhile."""
+
+    def __init__(self, scope_logger: logging.Logger):
+        super().__init__()
+        self.logger = scope_logger
+        self.captures: tuple[_HookRefusalCapture, ...] = ()  # replaced, never mutated
+        self.saved_level = scope_logger.level
+        self.saved_disabled = bool(scope_logger.disabled)
+        self.set_level = False
+        self.set_enabled = False
+
+    def open(self) -> None:
+        # Filter first, level last (and the reverse on close), so no record the
+        # change admits can reach a handler unfiltered. The filter list is replaced,
+        # never mutated, so a log call iterating it on another thread is unaffected.
+        lg = self.logger
+        self.set_enabled = bool(lg.disabled)
+        self.set_level = lg.getEffectiveLevel() > logging.WARNING
+        lg.filters = [self, *lg.filters]
+        if self.set_enabled:
+            lg.disabled = False
+        if self.set_level:
+            lg.setLevel(logging.WARNING)
+
+    def close(self) -> None:
+        lg = self.logger
+        if self.set_level and lg.level == logging.WARNING:
+            lg.setLevel(self.saved_level)
+        if self.set_enabled and not lg.disabled:
+            lg.disabled = self.saved_disabled
+        lg.filters = [f for f in lg.filters if f is not self]
+
+    def _configured_to_emit(self, record: logging.LogRecord) -> bool:
+        if not (self.set_level or self.set_enabled):
+            return True
+        if self.saved_disabled:
+            return False
+        level = self.saved_level
+        if level == logging.NOTSET and self.logger.parent is not None:
+            level = self.logger.parent.getEffectiveLevel()
+        return record.levelno >= level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        for capture in self.captures:
+            capture.observe(record)
+        return self._configured_to_emit(record)
+
+
+_capture_lock = threading.Lock()
+_capture_window: Optional[_RefusalCaptureWindow] = None
+
+
+def _open_refusal_capture(capture: _HookRefusalCapture) -> None:
+    global _capture_window
+    with _capture_lock:
+        window = _capture_window
+        if window is None:
+            window = _RefusalCaptureWindow(logging.getLogger(_CALLER_SCOPE_LOGGER))
+            window.open()
+            _capture_window = window
+        window.captures = window.captures + (capture,)
+
+
+def _close_refusal_capture(capture: _HookRefusalCapture) -> None:
+    global _capture_window
+    with _capture_lock:
+        window = _capture_window
+        if window is None:
+            return
+        window.captures = tuple(c for c in window.captures if c is not capture)
+        if not window.captures:
+            _capture_window = None
+            window.close()
 
 
 def _enter_session_owner_scope(agent: Any, session_id: str, owner_home: str) -> tuple[Callable[[], None], Optional[str]]:
@@ -596,12 +683,11 @@ def call_as_session_owner(
         )
         return False
     capture = _HookRefusalCapture(hook)
-    scope_logger = logging.getLogger(_CALLER_SCOPE_LOGGER)
-    scope_logger.addHandler(capture)
     try:
+        _open_refusal_capture(capture)
         fn()
     finally:
-        scope_logger.removeHandler(capture)
+        _close_refusal_capture(capture)
         restore()
     if capture.refused:
         logger.warning(
