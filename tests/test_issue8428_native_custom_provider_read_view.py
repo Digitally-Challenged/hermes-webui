@@ -1158,3 +1158,77 @@ def test_suppressed_read_view_keeps_the_owned_record_credential_and_context(monk
     lookup = routes._context_length_lookup_inputs_for_model("m", owned)
     assert lookup.config_context_length == 777777
     assert lookup.api_key == "fixture-replacement"
+
+
+def _random_native_store(rng):
+    names = ["alpha", "Alpha", "custom:alpha", "alpha-prod", "Alpha Prod", "beta", "custom:beta",
+             "Beta Gateway", "gamma", "omni", "custom:custom:omni", "Local (127.0.0.1:11434)",
+             "local-127.0.0.1-11434", "delta", "custom", "openai", "x-ai"]
+    store = {}
+    for _ in range(rng.randint(1, 9)):
+        key = rng.choice(names)
+        shape = rng.randint(0, 5)
+        if shape == 0:
+            record = "not-a-record"
+        elif shape == 1:
+            record = {}
+        else:
+            record = {}
+            if rng.random() < 0.6:
+                record["base_url"] = f"https://{rng.randint(1, 3)}.invalid/v1"
+            if rng.random() < 0.5:
+                record["api_key"] = f"k{rng.randint(1, 3)}"
+            if rng.random() < 0.3:
+                record["name"] = rng.choice(names)
+            if rng.random() < 0.2:
+                record["enabled"] = rng.choice([False, "no", True])
+            if rng.random() < 0.3:
+                record["models"] = {"m": {}}
+            if rng.random() < 0.2:
+                record["transport"] = "codex_responses"
+        store[key] = record
+    return store
+
+
+def test_scoped_native_view_matches_the_full_scan(monkeypatch):
+    """Scoping each identity's lookup to the keys that can name it is an
+    optimization only: across random stores with alias collisions, disabled and
+    metadata-only rows, the view equals one built from the whole mapping
+    (#8448 release gate, quadratic view)."""
+    import random
+
+    rng = random.Random(8448)
+    full_scope = lambda native, _index, _pid, _slug: native  # noqa: E731
+    compared = 0
+    for _ in range(600):
+        store = {"model": {"provider": rng.choice(["openai", "custom:alpha", "beta"])},
+                 "providers": _random_native_store(rng)}
+        for for_catalog in (False, True):
+            scoped = config._custom_provider_entries(copy.deepcopy(store), for_catalog=for_catalog)
+            with monkeypatch.context() as m:
+                m.setattr(config, "_native_identity_scope", full_scope)
+                full = config._custom_provider_entries(copy.deepcopy(store), for_catalog=for_catalog)
+            assert scoped == full, store
+            compared += 1
+    assert compared == 1200
+
+
+def test_native_view_is_linear_in_the_number_of_providers(monkeypatch):
+    """Bare ``providers: {name: ...}`` keys (the Agent's standard shape) took
+    every identity through a full rescan with the alias matcher: 40 providers
+    cost about 1 s per get_providers. One view now computes O(N) alias sets."""
+    store = {"model": {"provider": "openai"}, "providers": {
+        f"p{i:02d}": {"name": f"Gateway {i}", "base_url": f"https://g{i}.invalid/v1", "api_key": f"k{i}"}
+        for i in range(40)
+    }}
+    calls = {"n": 0}
+    real = config._custom_provider_alias_set
+
+    def counted(*args):
+        calls["n"] += 1
+        return real(*args)
+
+    monkeypatch.setattr(config, "_custom_provider_alias_set", counted)
+    entries = config._custom_provider_entries(store)
+    assert len(entries) == 40
+    assert calls["n"] <= 4 * 40, calls

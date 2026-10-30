@@ -1568,6 +1568,46 @@ def _is_native_custom_provider_key(key: object) -> bool:
     )
 
 
+def _native_identity_index(native: dict) -> tuple[list, dict, dict, dict]:
+    """One pass over ``providers:`` for :func:`_custom_provider_entries`.
+
+    Maps every alias and slug a record can be named by (the two vocabularies of
+    :func:`_custom_record_names_identity`, from the same ``name or key``
+    expression the selectors use) to the record's position. Built once per view,
+    so resolving N identities costs O(N) instead of rescanning every key per
+    identity, which made the view quadratic in the number of native providers.
+    """
+    items = list(native.items())
+    by_alias: dict[str, set[int]] = {}
+    by_slug: dict[str, set[int]] = {}
+    by_key: dict = {}
+    for pos, (key, record) in enumerate(items):
+        by_key[key] = pos
+        display = (record.get("name") if isinstance(record, dict) else None) or key
+        for alias in _custom_provider_alias_set(display, key):
+            by_alias.setdefault(alias, set()).add(pos)
+        for value in (display, key):
+            if str(value or "").strip():
+                by_slug.setdefault(_custom_provider_slug_key(value), set()).add(pos)
+    return items, by_alias, by_slug, by_key
+
+
+def _native_identity_scope(native: dict, index: tuple, pid: str, slug: str) -> dict:
+    """The ``providers:`` entries that can name ``pid``, in their original order.
+
+    A superset of every key :func:`_native_custom_provider_record` can accept for
+    ``pid`` (its exact key, any record whose name or key carries ``pid`` as an
+    Agent alias, any whose name or key normalizes to ``slug``), so selecting from
+    it gives the same record, the same disabled verdict and the same collision
+    error as selecting from the whole mapping.
+    """
+    items, by_alias, by_slug, by_key = index
+    positions = set(by_alias.get(pid, ())) | set(by_slug.get(slug, ()))
+    if pid in by_key:
+        positions.add(by_key[pid])
+    return dict(items[pos] for pos in sorted(positions))
+
+
 def _custom_provider_entries(
     config_obj: dict | None = None, *, for_catalog: bool = False,
 ) -> list[dict]:
@@ -1591,6 +1631,7 @@ def _custom_provider_entries(
     if not isinstance(native, dict):
         return entries
     seen = {_custom_provider_slug_from_name(entry.get("name")) for entry in entries}
+    index = _native_identity_index(native)
     for key in native:
         if not _is_native_custom_provider_key(key):
             continue
@@ -1600,9 +1641,10 @@ def _custom_provider_entries(
         seen.add(identity)
         # Use the same exact-key precedence and collision check as runtime;
         # insertion order must never choose a different native authority.
+        slug = _custom_provider_slug_key(identity)
         try:
             record, _disabled = _native_custom_provider_record(
-                native, identity, _custom_provider_slug_key(identity),
+                _native_identity_scope(native, index, identity, slug), identity, slug,
             )
         except AmbiguousCustomProviderError:
             # Omit only this unusable identity. Explicit routing still validates
