@@ -751,6 +751,36 @@ def _gateway_status_approval(status: dict) -> dict | None:
     return None
 
 
+def _gateway_approval_identity_v1(approval_data: dict, base_url: str, api_key: str) -> bool:
+    """Decide once, at card-creation time, whether this card carries a canonical identity.
+
+    Shared by every card origin — the Runs API relay and the default
+    ``/v1/chat/completions`` stream — so both publish the same creation-time
+    decision and ``/api/approval/respond`` never has to re-derive it: it
+    cannot, because the advertised capability is not published by gateways
+    that fence prompts by generation.
+
+    Exact-id answering needs a trustworthy per-prompt identity. A gateway that
+    published an ``execution_generation`` for this prompt proves it can fence
+    the answer to that exact prompt (canonical Runs API contract), so the
+    generation itself is the authority; the advertised capability remains the
+    fallback for gateways that only promise it via ``/v1/capabilities``.
+
+    A locally generated fallback id (``_gateway_raw_approval_id_present`` is
+    False) is never canonical: the gateway did not publish that id, so
+    answering with it is a guaranteed 400. It must not be promoted into one
+    here — the legacy body shape is the only honest answer for such a card.
+    """
+    from api.config import gateway_supports_approval_identity_v1
+
+    approval_data = approval_data or {}
+    if not bool(approval_data.get("_gateway_raw_approval_id_present")):
+        return False
+    if approval_data.get("_gateway_execution_generation") is not None:
+        return True
+    return bool(gateway_supports_approval_identity_v1(base_url, api_key))
+
+
 def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> bool:
     """Auto-approve or surface one runs-API approval request as a WebUI approval card.
 
@@ -762,17 +792,9 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
     if not approval_data:
         return False
     approval_data["run_id"] = run_id
-    from api.config import gateway_supports_approval_identity_v1
-    # Exact-id answering needs a trustworthy per-prompt identity. A gateway
-    # that published an ``execution_generation`` for this prompt proves it can
-    # fence the answer to that exact prompt (canonical Runs API contract), so
-    # the generation itself is the authority; the advertised capability remains
-    # the fallback for gateways that only promise it via /v1/capabilities.
-    identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and (
-        approval_data.get("_gateway_execution_generation") is not None
-        or gateway_supports_approval_identity_v1(base_url, api_key)
+    approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
+        approval_data, base_url, api_key
     )
-    approval_data["_gateway_agent_identity_v1"] = identity_v1
     auto_approved, head, total = _settle_gateway_run_approval(
         session_id,
         approval_data,
@@ -2899,6 +2921,57 @@ def _cleanup_gateway_pending_mirror(session_id: str) -> None:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 
 
+def settle_gateway_stream_approvals(session_id: str, stream_id: str, *, reason: str) -> None:
+    """Fail-close every approval card of the Gateway run ``stream_id`` maps to.
+
+    Shared by the stream worker's teardown and ``cancel_stream`` (user Stop and
+    the #7293 server settle). Stop must retire the run's cards itself: the
+    worker can stay blocked on the Gateway socket long after the turn was saved
+    as interrupted, and until its teardown a click on the card was still relayed
+    and resumed a run WebUI had already recorded as stopped.
+
+    Deliberately lock-free beyond the approval registry's own ``_lock``: Stop and
+    the server settle must never wait on an approval relay (whose POST is bounded
+    only by the runner client's timeout). Once this returns, a click finds the
+    card gone and gets 409 without reaching the Gateway. A relay that had
+    already validated its card before this ran still sends its one POST; that is
+    a click that effectively happened just before Stop.
+    """
+    from api.route_approvals import settle_gateway_pending_run
+
+    run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip() if stream_id else ""
+    if not session_id or not run_id:
+        return
+    settle_gateway_pending_run(session_id, run_id, reason=reason)
+
+
+def _submit_stream_approval_mirror(session_id: str, approval_data: dict, cancel_event) -> tuple[dict | None, int]:
+    """Publish a default-stream approval card unless its stream is being stopped.
+
+    Stop sets the cancel flag and then retires the run's cards under the approval
+    registry lock. The insertion re-checks the flag under that same lock
+    (``submit_gateway_pending_mirror(..., cancel_event=...)``), so either the
+    card is inserted before Stop's retirement (which then removes it) or the
+    insertion sees the flag and publishes nothing. No card can appear after
+    Stop has returned, not even before the recheck below. The recheck after
+    publishing stays as a second line of defence. (A click that validated the
+    card in the instant before it was retired still relays once; that is a
+    click that happened before Stop, not after it.)
+    """
+    from api.route_approvals import settle_gateway_pending_run, submit_gateway_pending_mirror
+
+    if cancel_event.is_set():
+        return None, 0
+    head, total = submit_gateway_pending_mirror(session_id, approval_data, cancel_event=cancel_event)
+    run_id = str(approval_data.get("run_id") or "").strip()
+    if run_id and cancel_event.is_set():
+        settle_gateway_pending_run(
+            session_id, run_id, reason="Gateway run was cancelled before approval resolution",
+        )
+        return None, 0
+    return head, total
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -3259,9 +3332,18 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
+                            # Same creation-time identity decision the Runs API
+                            # relay makes (#8579): the mirror must carry the
+                            # marker /api/approval/respond reads, or a
+                            # generation-fenced gateway rejects the relayed
+                            # answer with 400 invalid_params and the card never
+                            # settles. Skipping it here silently downgraded
+                            # every default-stream card to the legacy body.
+                            approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
+                                approval_data, base_url, api_key
+                            )
                             try:
-                                from api.route_approvals import submit_gateway_pending_mirror
-                                head, total = submit_gateway_pending_mirror(session_id, approval_data)
+                                head, total = _submit_stream_approval_mirror(session_id, approval_data, cancel_event)
                                 approval_data = {**(head or approval_data), "pending_count": total}
                             except Exception:
                                 logger.debug("submit_gateway_pending_mirror failed", exc_info=True)
@@ -3604,17 +3686,14 @@ def _run_gateway_chat_streaming(
             "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
         })
     finally:
-        mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
-        if mapped_run_id:
-            try:
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    mapped_run_id,
-                    reason="Gateway run ended during teardown before approval resolution",
-                )
-            except Exception:
-                logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
+        try:
+            settle_gateway_stream_approvals(
+                session_id,
+                stream_id,
+                reason="Gateway run ended during teardown before approval resolution",
+            )
+        except Exception:
+            logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):
